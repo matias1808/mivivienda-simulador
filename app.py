@@ -19,6 +19,7 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from io import BytesIO
+import os
 
 # ----------------------------- Config general -----------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
