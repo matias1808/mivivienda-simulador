@@ -338,7 +338,7 @@ if not st.session_state.auth.get("logged"):
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
 st.caption("Empresa inmobiliaria – cálculo de cronograma, VAN/TIR/TCEA y gestión de clientes & unidades")
 
-sec1, sec2, sec3 = st.tabs(["1) Cliente y Unidad", "2) Configurar Préstamo", "3) Resultados & Guardado"])
+sec1, sec2, sec3, sec4 = st.tabs(["1) Cliente y Unidad", "2) Configurar Préstamo", "3) Resultados & Guardado", "4) Base de datos"])
 
 # ----------------------------- 1) Cliente y Unidad -----------------------------
 with sec1:
@@ -578,7 +578,15 @@ with sec3:
 
         colnpv1, colnpv2 = st.columns(2)
         with colnpv1:
-            disc_rate_annual = st.number_input("Tasa de descuento anual para VAN (%)", min_value=0.0, step=0.1, value=cfg["tasa_anual"]*100) / 100.0
+            disc_rate_annual = (
+                st.number_input(
+                    "Tasa de descuento anual para VAN (%)",
+                    min_value=0.0,
+                    step=0.1,
+                    value=cfg["tasa_anual"] * 100,
+                )
+                / 100.0
+            )
         with colnpv2:
             disc_m = tea_to_monthly(disc_rate_annual)
             st.write(f"Tasa de descuento mensual: {disc_m*100:.4f}%")
@@ -600,12 +608,12 @@ with sec3:
             }), width='stretch'
         )
 
-        xlsx_bytes = df_to_xlsx_bytes(df)
+        csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
-            "⬇️ Descargar cronograma XLSX",
-            xlsx_bytes,
-            file_name="cronograma_mivivienda.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "⬇️ Descargar cronograma CSV",
+            csv_bytes,
+            file_name="cronograma_mivivienda.csv",
+            mime="text/csv",
         )
 
         st.markdown("---")
@@ -630,12 +638,20 @@ with sec3:
                 client_id = sel_client_label_to_id[client_label]
                 unit_id = sel_unit_label_to_id[unit_label]
                 params = {**cfg, "generated_at": datetime.utcnow().isoformat()}
-                cur.execute("INSERT INTO cases (user, client_id, unit_id, case_name, params_json, created_at) VALUES (?,?,?,?,?,?)",
-                            (st.session_state.auth['user'], client_id, unit_id, case_name, pd.Series(params).to_json(), datetime.utcnow().isoformat()))
+                cur.execute(
+                    "INSERT INTO cases (user, client_id, unit_id, case_name, params_json, created_at) VALUES (?,?,?,?,?,?)",
+                    (
+                        st.session_state.auth['user'],
+                        client_id,
+                        unit_id,
+                        case_name,
+                        pd.Series(params).to_json(),
+                        datetime.utcnow().isoformat(),
+                    ),
+                )
                 get_conn().commit()
                 st.success("Caso guardado")
 
-                # Mostrar inmediatamente el mismo caso guardado
                 cur.execute(
                     """
                     SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project
@@ -656,7 +672,7 @@ with sec3:
         st.subheader("Cargar caso previo")
         cur.execute(
             """
-            SELECT cases.id, cases.case_name, clients.full_name, units.code
+            SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project, cases.params_json
             FROM cases
             LEFT JOIN clients ON clients.id = cases.client_id
             LEFT JOIN units ON units.id = cases.unit_id
@@ -673,13 +689,16 @@ with sec3:
                 st.warning("Seleccione un caso válido")
             else:
                 case_id = label_to_caseid[case_label]
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT cases.case_name, clients.full_name, units.code, units.project, cases.params_json
                     FROM cases
                     LEFT JOIN clients ON clients.id = cases.client_id
                     LEFT JOIN units ON units.id = cases.unit_id
                     WHERE cases.id=?
-                """, (case_id,))
+                    """,
+                    (case_id,),
+                )
                 row = cur.fetchone()
                 if row and row[4]:
                     case_name, client_name, code_u, proj_u, params_json = row
@@ -700,12 +719,12 @@ with sec3:
                     st.session_state["schedule_df"] = df2
                     st.success(f"Caso #{case_id} cargado")
 
-                    # === Mostrar abajo el mismo caso cargado ===
+                    # Detalle (sin JSON)
                     with st.expander("📄 Detalle del caso cargado", expanded=True):
                         st.write(f"**Caso**: #{case_id} – {case_name}")
                         st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
 
-                    # === Mostrar TABLA del cronograma inmediatamente ===
+                    # Tabla + descarga CSV
                     st.markdown("### 📅 Cronograma del caso cargado")
                     st.dataframe(
                         df2.style.format({
@@ -720,16 +739,44 @@ with sec3:
                             "Flujo Cliente": "{:,.2f}",
                         }), width='stretch'
                     )
-                    xlsx2 = df_to_xlsx_bytes(df2, sheet_name=f"Caso_{case_id}")
+                    csv2 = df2.to_csv(index=False).encode("utf-8-sig")
                     st.download_button(
-                        "⬇️ Descargar cronograma (XLSX)",
-                        xlsx2,
-                        file_name=f"cronograma_caso_{case_id}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "⬇️ Descargar cronograma (CSV)",
+                        csv2,
+                        file_name=f"cronograma_caso_{case_id}.csv",
+                        mime="text/csv",
                     )
                 else:
                     st.error("No se pudo leer el caso seleccionado")
-                
+
+# ----------------------------- 4) Base de datos -----------------------------
+with sec4:
+    st.subheader("Base de datos")
+    import tempfile as _tmp
+    db_path = os.environ.get("DB_PATH") or (st.secrets.get("DB_PATH", None) if hasattr(st, "secrets") else None) or os.path.join(_tmp.gettempdir(), "mivivienda.db")
+    st.write("**Archivo**:", db_path)
+    try:
+        size_bytes = os.path.getsize(db_path)
+        st.write(f"**Tamaño**: {size_bytes/1024:.1f} KB")
+        with open(db_path, "rb") as f:
+            st.download_button("⬇️ Descargar base de datos (.db)", f.read(), file_name="mivivienda.db")
+    except Exception:
+        st.info("Aún no existe el archivo de base de datos (se creará al guardar) ✔️")
+
+    dot = r"""
+    digraph G {
+      rankdir=LR; node [shape=record, fontsize=11];
+      users [label="{users| id PK| username UNIQUE| password_hash| created_at }"];
+      clients [label="{clients| id PK| doc_id UNIQUE| full_name| phone| email| income_monthly| dependents| employment_type| notes| created_by| created_at| updated_at }"];
+      units [label="{units| id PK| code UNIQUE| project| created_by| created_at| updated_at }"];
+      cases [label="{cases| id PK| user| client_id FK→clients.id| unit_id FK→units.id| case_name| params_json| created_at }"];
+      cases -> clients [label="client_id"]; cases -> units [label="unit_id"]; users -> cases [style=dotted,label="user (texto)"];
+    }
+    """
+    try:
+        st.graphviz_chart(dot)
+    except Exception:
+        st.code(dot)
 
 st.markdown("""
 ---
