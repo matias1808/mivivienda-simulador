@@ -62,7 +62,7 @@ def init_db():
         )
         """
     )
-    # Unidades inmobiliarias (dejamos columna project para compatibilidad, pero la UI solo usa code)
+    # Unidades inmobiliarias (código + nombre)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS units (
@@ -91,6 +91,18 @@ def init_db():
         )
         """
     )
+
+    # ---------------- M I G R A C I O N E S ----------------
+    # Asegura que la columna 'project' exista en units (por si vienes de versiones previas)
+    cur.execute("PRAGMA table_info(units)")
+    cols = [r[1] for r in cur.fetchall()]
+    if 'project' not in cols:
+        cur.execute("ALTER TABLE units ADD COLUMN project TEXT")
+
+    # Asegura índices útiles
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_doc_id ON clients(doc_id)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_code ON units(code)")
+
     conn.commit()
     return conn
 
@@ -330,10 +342,10 @@ with sec1:
         btn_save_client = st.button("💾 Guardar cliente")
 
     def valid_email(s: str) -> bool:
-        return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s or ""))
+        return bool(re.match(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", s or ""))
 
     def valid_phone_pe(s: str) -> bool:
-        return bool(re.fullmatch(r"\d{9}", (s or "").strip()))
+        return bool(re.fullmatch(r"\\d{9}", (s or "").strip()))
 
     if btn_save_client:
         missing = []
@@ -350,18 +362,16 @@ with sec1:
         else:
             now = datetime.utcnow().isoformat()
             cur = get_conn().cursor()
-            if editing_client_id:
-                cur.execute(
-                    """
-                    UPDATE clients SET doc_id=?, full_name=?, phone=?, email=?, income_monthly=?, dependents=?,
-                    employment_type=?, notes=?, updated_at=? WHERE id=?
-                    """,
-                    (doc_id, full_name, phone, email, income_monthly, dependents, employment_type, notes_client, now, editing_client_id)
-                )
-                get_conn().commit()
-                st.success("Cliente actualizado")
-            else:
-                try:
+            try:
+                if editing_client_id:
+                    cur.execute(
+                        """
+                        UPDATE clients SET doc_id=?, full_name=?, phone=?, email=?, income_monthly=?, dependents=?,
+                        employment_type=?, notes=?, updated_at=? WHERE id=?
+                        """,
+                        (doc_id, full_name, phone, email, income_monthly, dependents, employment_type, notes_client, now, editing_client_id)
+                    )
+                else:
                     cur.execute(
                         """
                         INSERT INTO clients (doc_id, full_name, phone, email, income_monthly, dependents,
@@ -371,20 +381,24 @@ with sec1:
                         (doc_id, full_name, phone, email, income_monthly, dependents, employment_type, notes_client,
                          st.session_state.auth['user'], now, now)
                     )
-                    get_conn().commit()
-                    st.success("Cliente creado")
-                except sqlite3.IntegrityError:
-                    st.error("Ya existe un cliente con ese Documento")
+                get_conn().commit()
+                st.success("Cliente guardado")
+            except sqlite3.IntegrityError:
+                st.error("Documento duplicado: ya existe un cliente con ese documento")
+            except sqlite3.OperationalError:
+                st.error("No se pudo guardar el cliente (error de base de datos)")
 
     st.markdown("---")
     st.subheader("Unidad inmobiliaria")
 
-    cur.execute("SELECT id, code FROM units ORDER BY code ASC")
+    # Traer unidades (código + nombre)
+    cur.execute("SELECT id, code, project FROM units ORDER BY code ASC")
     units_list = cur.fetchall()
-    unit_labels = ["➕ Nueva unidad"] + [f"{u[1]} (ID {u[0]})" for u in units_list]
-    unit_choice = st.selectbox("Editar unidad (solo Código)", unit_labels, index=0)
+    unit_labels = ["➕ Nueva unidad"] + [f"{u[1]} – {u[2] or ''} (ID {u[0]})" for u in units_list]
+    unit_choice = st.selectbox("Editar unidad (Código y Nombre)", unit_labels, index=0)
 
     code = ""
+    project = ""
     editing_unit_id = None
 
     if unit_choice != "➕ Nueva unidad":
@@ -392,31 +406,34 @@ with sec1:
         u = units_list[idx]
         editing_unit_id = u[0]
         code = u[1] or ""
+        project = u[2] or ""
 
-    code = st.text_input("Código (OBLIGATORIO)", value=code)
+    colu1, colu2 = st.columns(2)
+    with colu1:
+        code = st.text_input("Código (OBLIGATORIO)", value=code)
+    with colu2:
+        project = st.text_input("Nombre (OBLIGATORIO)", value=project)
+
     btn_save_unit = st.button("💾 Guardar unidad")
 
     if btn_save_unit:
-        if not code:
-            st.error("Complete el Código de la unidad")
+        if not code or not project:
+            st.error("Complete Código y Nombre")
         else:
             now = datetime.utcnow().isoformat()
             cur = get_conn().cursor()
-            if editing_unit_id:
-                try:
-                    cur.execute("UPDATE units SET code=?, updated_at=? WHERE id=?", (code, now, editing_unit_id))
-                    get_conn().commit()
-                    st.success("Unidad actualizada")
-                except sqlite3.IntegrityError:
-                    st.error("Ya existe otra unidad con ese Código")
-            else:
-                try:
-                    cur.execute("INSERT INTO units (code, created_by, created_at, updated_at) VALUES (?,?,?,?)",
-                                (code, st.session_state.auth['user'], now, now))
-                    get_conn().commit()
-                    st.success("Unidad creada")
-                except sqlite3.IntegrityError:
-                    st.error("Ya existe una unidad con ese Código")
+            try:
+                if editing_unit_id:
+                    cur.execute("UPDATE units SET code=?, project=?, updated_at=? WHERE id=?", (code, project, now, editing_unit_id))
+                else:
+                    cur.execute("INSERT INTO units (code, project, created_by, created_at, updated_at) VALUES (?,?,?,?,?)",
+                                (code, project, st.session_state.auth['user'], now, now))
+                get_conn().commit()
+                st.success("Unidad guardada")
+            except sqlite3.IntegrityError:
+                st.error("Código duplicado: ya existe una unidad con ese Código")
+            except sqlite3.OperationalError:
+                st.error("No se pudo guardar la unidad (error de base de datos)")
 
 # ----------------------------- 2) Configurar Préstamo -----------------------------
 with sec2:
@@ -590,10 +607,17 @@ with sec3:
                 st.warning("Seleccione un caso válido")
             else:
                 case_id = label_to_caseid[case_label]
-                cur.execute("SELECT params_json FROM cases WHERE id=?", (case_id,))
+                cur.execute("""
+                    SELECT cases.case_name, clients.full_name, units.code, units.project, cases.params_json
+                    FROM cases
+                    LEFT JOIN clients ON clients.id = cases.client_id
+                    LEFT JOIN units ON units.id = cases.unit_id
+                    WHERE cases.id=?
+                """, (case_id,))
                 row = cur.fetchone()
-                if row and row[0]:
-                    params = pd.read_json(row[0], typ='series')
+                if row and row[4]:
+                    case_name, client_name, code_u, proj_u, params_json = row
+                    params = pd.read_json(params_json, typ='series')
                     st.session_state["schedule_cfg"] = dict(params)
                     df2 = build_schedule(
                         principal=params["principal"],
@@ -609,6 +633,12 @@ with sec3:
                     )
                     st.session_state["schedule_df"] = df2
                     st.success(f"Caso #{case_id} cargado")
+
+                    # === Mostrar abajo el mismo caso cargado ===
+                    with st.expander("📄 Detalle del caso cargado", expanded=True):
+                        st.write(f"**Caso**: #{case_id} – {case_name}")
+                        st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
+                        st.json(dict(params))
                 else:
                     st.error("No se pudo leer el caso seleccionado")
 
