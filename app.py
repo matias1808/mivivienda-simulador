@@ -25,7 +25,18 @@ st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layo
 # ----------------------------- Utilitarios DB -----------------------------
 @st.cache_resource(show_spinner=False)
 def get_conn():
-    conn = sqlite3.connect("mivivienda.db", check_same_thread=False)
+    import os, tempfile
+    # En Streamlit Cloud el workspace del código es de solo lectura.
+    # Usamos un directorio **escribible** (\"/tmp\") por defecto, o un DB_PATH si está configurado.
+    db_path = None
+    try:
+        db_path = st.secrets.get("DB_PATH", None)
+    except Exception:
+        db_path = None
+    db_path = os.environ.get("DB_PATH", db_path)
+    if not db_path:
+        db_path = os.path.join(tempfile.gettempdir(), "mivivienda.db")  # típicamente /tmp/mivivienda.db
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     return conn
 
 @st.cache_resource(show_spinner=False)
@@ -342,10 +353,10 @@ with sec1:
         btn_save_client = st.button("💾 Guardar cliente")
 
     def valid_email(s: str) -> bool:
-        return bool(re.match(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", s or ""))
+        return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s or ""))
 
     def valid_phone_pe(s: str) -> bool:
-        return bool(re.fullmatch(r"\\d{9}", (s or "").strip()))
+        return bool(re.fullmatch(r"\d{9}", (s or "").strip()))
 
     if btn_save_client:
         missing = []
@@ -585,6 +596,23 @@ with sec3:
                             (st.session_state.auth['user'], client_id, unit_id, case_name, pd.Series(params).to_json(), datetime.utcnow().isoformat()))
                 get_conn().commit()
                 st.success("Caso guardado")
+
+                # Mostrar inmediatamente el mismo caso guardado
+                cur.execute(
+                    """
+                    SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project
+                    FROM cases
+                    LEFT JOIN clients ON clients.id = cases.client_id
+                    LEFT JOIN units ON units.id = cases.unit_id
+                    ORDER BY cases.id DESC LIMIT 1
+                    """
+                )
+                new_row = cur.fetchone()
+                if new_row:
+                    nid, nname, nclient, ncode, nproj = new_row
+                    with st.expander("📄 Caso recién guardado", expanded=True):
+                        st.write(f"**Caso**: #{nid} – {nname}")
+                        st.write(f"**Cliente**: {nclient or '-'}  |  **Unidad**: {ncode or '-'} – {nproj or '-'}")
 
         st.markdown("---")
         st.subheader("Cargar caso previo")
