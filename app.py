@@ -4,15 +4,11 @@
 Simulador MiVivienda / Techo Propio – Método Francés Vencido (meses de 30 días)
 Compatible con Streamlit Community Cloud (https://streamlit.io/cloud)
 
-Cambios implementados según feedback:
-- Corregida carga de "caso previo" (selector muestra y carga el caso correcto por ID).
-- En "Unidad inmobiliaria" ahora solo se gestionan **código** y **nombre** (proyecto).
-- Ocultados mensajes/errores molestos al **iniciar/cerrar sesión** (flujo silencioso con `st.rerun`).
-- Validaciones estrictas en **Clientes** (todos los campos obligatorios, teléfono 9 dígitos PE, email formato `xyz@xyz.com`).
-- Caja para **seleccionar y editar** clientes ya registrados.
-- En la carga de casos se muestra **#caso – nombre del cliente – vivienda (código/nombre)**.
-
-Nota: Ejemplo educativo. Revise normas SBS y MiVivienda antes de producción.
+Ajustes por nuevas observaciones:
+- Registro de usuario **sin mensajes** de éxito (flujo silencioso con `st.rerun`).
+- Regla: **Gracia parcial no puede ser mayor que la gracia total** (bloquea cálculo y muestra error).
+- Unidad inmobiliaria: **solo campo Código** (se quita "Proyecto/Nombre" de la UI y de las etiquetas visibles).
+- Se refuerza la sección **Guardar/Cargar caso** para que siempre aparezca tras generar cronograma.
 """
 
 import streamlit as st
@@ -66,7 +62,7 @@ def init_db():
         )
         """
     )
-    # Unidades inmobiliarias (solo código y nombre)
+    # Unidades inmobiliarias (dejamos columna project para compatibilidad, pero la UI solo usa code)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS units (
@@ -257,7 +253,7 @@ with st.sidebar:
             if st.button("Entrar", use_container_width=True):
                 if check_login(u, p):
                     st.session_state.auth = {"logged": True, "user": u}
-                    st.rerun()  # sin mensajes
+                    st.rerun()
                 else:
                     st.error("Credenciales inválidas")
         with signup_tab:
@@ -267,7 +263,8 @@ with st.sidebar:
                 if u2 and p2:
                     ok = create_user(u2, p2)
                     if ok:
-                        st.success("Usuario creado. Inicie sesión.")
+                        # Sin mensajes: recargar de forma silenciosa
+                        st.rerun()
                     else:
                         st.error("El usuario ya existe.")
                 else:
@@ -276,7 +273,7 @@ with st.sidebar:
         st.write(f"👤 {st.session_state.auth['user']}")
         if st.button("Cerrar sesión", use_container_width=True):
             st.session_state.clear()
-            st.rerun()  # sin mensajes
+            st.rerun()
 
 if not st.session_state.auth.get("logged"):
     st.stop()
@@ -310,7 +307,6 @@ with sec1:
     editing_client_id = None
 
     if client_choice != "➕ Nuevo cliente":
-        # Cargar datos del cliente elegido
         idx = client_labels.index(client_choice) - 1
         c = clients_list[idx]
         editing_client_id = c[0]
@@ -340,7 +336,6 @@ with sec1:
         return bool(re.fullmatch(r"\d{9}", (s or "").strip()))
 
     if btn_save_client:
-        # Validaciones obligatorias
         missing = []
         if not doc_id: missing.append("Documento")
         if not full_name: missing.append("Nombre completo")
@@ -355,7 +350,7 @@ with sec1:
         else:
             now = datetime.utcnow().isoformat()
             cur = get_conn().cursor()
-            if editing_client_id:  # actualizar
+            if editing_client_id:
                 cur.execute(
                     """
                     UPDATE clients SET doc_id=?, full_name=?, phone=?, email=?, income_monthly=?, dependents=?,
@@ -365,7 +360,7 @@ with sec1:
                 )
                 get_conn().commit()
                 st.success("Cliente actualizado")
-            else:  # crear
+            else:
                 try:
                     cur.execute(
                         """
@@ -382,15 +377,14 @@ with sec1:
                     st.error("Ya existe un cliente con ese Documento")
 
     st.markdown("---")
-    st.subheader("Unidad inmobiliaria (solo Código y Nombre)")
+    st.subheader("Unidad inmobiliaria")
 
-    cur.execute("SELECT id, code, project FROM units ORDER BY project ASC")
+    cur.execute("SELECT id, code FROM units ORDER BY code ASC")
     units_list = cur.fetchall()
-    unit_labels = ["➕ Nueva unidad"] + [f"{u[1]} – {u[2]} (ID {u[0]})" for u in units_list]
-    unit_choice = st.selectbox("Editar unidad", unit_labels, index=0)
+    unit_labels = ["➕ Nueva unidad"] + [f"{u[1]} (ID {u[0]})" for u in units_list]
+    unit_choice = st.selectbox("Editar unidad (solo Código)", unit_labels, index=0)
 
     code = ""
-    project = ""
     editing_unit_id = None
 
     if unit_choice != "➕ Nueva unidad":
@@ -398,32 +392,27 @@ with sec1:
         u = units_list[idx]
         editing_unit_id = u[0]
         code = u[1] or ""
-        project = u[2] or ""
 
-    colu1, colu2 = st.columns(2)
-    with colu1:
-        code = st.text_input("Código (OBLIGATORIO)", value=code)
-    with colu2:
-        project = st.text_input("Nombre / Proyecto (OBLIGATORIO)", value=project)
+    code = st.text_input("Código (OBLIGATORIO)", value=code)
     btn_save_unit = st.button("💾 Guardar unidad")
 
     if btn_save_unit:
-        if not code or not project:
-            st.error("Complete Código y Nombre/Proyecto")
+        if not code:
+            st.error("Complete el Código de la unidad")
         else:
             now = datetime.utcnow().isoformat()
             cur = get_conn().cursor()
             if editing_unit_id:
                 try:
-                    cur.execute("UPDATE units SET code=?, project=?, updated_at=? WHERE id=?", (code, project, now, editing_unit_id))
+                    cur.execute("UPDATE units SET code=?, updated_at=? WHERE id=?", (code, now, editing_unit_id))
                     get_conn().commit()
                     st.success("Unidad actualizada")
                 except sqlite3.IntegrityError:
                     st.error("Ya existe otra unidad con ese Código")
             else:
                 try:
-                    cur.execute("INSERT INTO units (code, project, created_by, created_at, updated_at) VALUES (?,?,?,?,?)",
-                                (code, project, st.session_state.auth['user'], now, now))
+                    cur.execute("INSERT INTO units (code, created_by, created_at, updated_at) VALUES (?,?,?,?)",
+                                (code, st.session_state.auth['user'], now, now))
                     get_conn().commit()
                     st.success("Unidad creada")
                 except sqlite3.IntegrityError:
@@ -451,6 +440,7 @@ with sec2:
         monthly_insurance = st.number_input("Seguro mensual", min_value=0.0, step=10.0)
         monthly_admin_fee = st.number_input("Gasto admin mensual", min_value=0.0, step=10.0)
 
+    # Tasa efectiva mensual
     if tasa_tipo == "Efectiva (TEA)":
         i_m = tea_to_monthly(tasa_anual)
     else:
@@ -458,41 +448,49 @@ with sec2:
 
     st.caption(f"Tasa efectiva mensual: {i_m*100:.5f}% | Convención 30/360 | Pagos vencidos")
 
+    # Nuevas validaciones
+    if grace_partial > grace_total:
+        st.error("La gracia parcial no puede ser mayor que la gracia total.")
     if grace_total + grace_partial >= term_months:
         st.warning("La suma de gracia total y parcial no puede ser ≥ al plazo total.")
 
     compute = st.button("📅 Generar cronograma")
 
     if compute:
-        df = build_schedule(
-            principal=principal,
-            i_m=i_m,
-            n_months=int(term_months - (grace_total + grace_partial)),
-            grace_total=int(grace_total),
-            grace_partial=int(grace_partial),
-            start_date=datetime.today(),
-            fee_opening=fee_opening,
-            monthly_insurance=monthly_insurance,
-            monthly_admin_fee=monthly_admin_fee,
-            bono_monto=bono,
-        )
-        st.session_state["schedule_df"] = df
-        st.session_state["schedule_cfg"] = {
-            "currency": currency,
-            "principal": principal,
-            "bono": bono,
-            "term_months": term_months,
-            "tasa_tipo": tasa_tipo,
-            "tasa_anual": tasa_anual,
-            "cap_m": cap_m,
-            "grace_total": grace_total,
-            "grace_partial": grace_partial,
-            "fee_opening": fee_opening,
-            "monthly_insurance": monthly_insurance,
-            "monthly_admin_fee": monthly_admin_fee,
-            "i_m": i_m,
-        }
-        st.success("Cronograma generado. Revise la pestaña 3)")
+        if grace_partial > grace_total:
+            st.error("Corrija los meses de gracia: parcial > total.")
+        elif grace_total + grace_partial >= term_months:
+            st.error("Ajuste los meses de gracia vs plazo total.")
+        else:
+            df = build_schedule(
+                principal=principal,
+                i_m=i_m,
+                n_months=int(term_months - (grace_total + grace_partial)),
+                grace_total=int(grace_total),
+                grace_partial=int(grace_partial),
+                start_date=datetime.today(),
+                fee_opening=fee_opening,
+                monthly_insurance=monthly_insurance,
+                monthly_admin_fee=monthly_admin_fee,
+                bono_monto=bono,
+            )
+            st.session_state["schedule_df"] = df
+            st.session_state["schedule_cfg"] = {
+                "currency": currency,
+                "principal": principal,
+                "bono": bono,
+                "term_months": term_months,
+                "tasa_tipo": tasa_tipo,
+                "tasa_anual": tasa_anual,
+                "cap_m": cap_m,
+                "grace_total": grace_total,
+                "grace_partial": grace_partial,
+                "fee_opening": fee_opening,
+                "monthly_insurance": monthly_insurance,
+                "monthly_admin_fee": monthly_admin_fee,
+                "i_m": i_m,
+            }
+            st.success("Cronograma generado. Revise la pestaña 3)")
 
 # ----------------------------- 3) Resultados & Guardado -----------------------------
 with sec3:
@@ -546,18 +544,17 @@ with sec3:
 
         st.markdown("---")
         st.subheader("Guardar caso")
-        # Listas de clientes y unidades para guardar
         cur = get_conn().cursor()
         cur.execute("SELECT id, full_name FROM clients ORDER BY full_name ASC")
         clients_for_save = cur.fetchall()
-        cur.execute("SELECT id, code, project FROM units ORDER BY project ASC")
+        cur.execute("SELECT id, code FROM units ORDER BY code ASC")
         units_for_save = cur.fetchall()
 
         sel_client_label_to_id = {f"{c[1]} (ID {c[0]})": c[0] for c in clients_for_save}
-        sel_unit_label_to_id = {f"{u[1]} / {u[2]} (ID {u[0]})": u[0] for u in units_for_save}
+        sel_unit_label_to_id = {f"{u[1]} (ID {u[0]})": u[0] for u in units_for_save}
 
         client_label = st.selectbox("Cliente", options=["- Seleccione -"] + list(sel_client_label_to_id.keys()))
-        unit_label = st.selectbox("Unidad", options=["- Seleccione -"] + list(sel_unit_label_to_id.keys()))
+        unit_label = st.selectbox("Unidad (Código)", options=["- Seleccione -"] + list(sel_unit_label_to_id.keys()))
         case_name = st.text_input("Nombre del caso", value="")
 
         if st.button("💾 Guardar caso en base de datos"):
@@ -574,10 +571,9 @@ with sec3:
 
         st.markdown("---")
         st.subheader("Cargar caso previo")
-        # Mostrar etiqueta: #ID – Cliente – Vivienda
         cur.execute(
             """
-            SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project
+            SELECT cases.id, cases.case_name, clients.full_name, units.code
             FROM cases
             LEFT JOIN clients ON clients.id = cases.client_id
             LEFT JOIN units ON units.id = cases.unit_id
@@ -585,11 +581,12 @@ with sec3:
             """
         )
         rows = cur.fetchall()
-        label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[3] or 'CODE?'} / {r[4] or 'PROYECTO?'} – {r[1]}": r[0] for r in rows}
-        case_label = st.selectbox("Casos", options=["- Seleccione -"] + list(label_to_caseid.keys()))
+        label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[3] or 'CODE?'} – {r[1]}": r[0] for r in rows}
+        options_cases = ["- Seleccione -"] + list(label_to_caseid.keys()) if rows else ["(No hay casos guardados)"]
+        case_label = st.selectbox("Casos", options=options_cases)
 
         if st.button("📂 Cargar parámetros del caso"):
-            if case_label == "- Seleccione -":
+            if not rows or case_label in ("- Seleccione -", "(No hay casos guardados)"):
                 st.warning("Seleccione un caso válido")
             else:
                 case_id = label_to_caseid[case_label]
