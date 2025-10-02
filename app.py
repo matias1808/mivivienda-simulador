@@ -19,7 +19,6 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from io import BytesIO
-import os
 
 # ----------------------------- Config general -----------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
@@ -150,20 +149,33 @@ if cur.fetchone()[0] == 0:
 
 # ----------------------------- Cálculos financieros -----------------------------
 def nominal_to_effective_monthly(tna: float, cap_per_year: int) -> float:
+    """
+    Convierte TNA con capitalización m/año a tasa efectiva mensual (TEM),
+    siguiendo el "puente" por tasa efectiva anual (TEA):
+      TEA = (1 + TNA/m)^m - 1  →  TEM = (1 + TEA)^(1/12) - 1
+    """
     m = max(1, int(cap_per_year))
-    return (1 + tna / m) ** (m / 12.0) - 1.0
+    tea = (1.0 + (tna / m)) ** m - 1.0
+    tem = (1.0 + tea) ** (1.0 / 12.0) - 1.0
+    return tem
 
 
 def tea_to_monthly(tea: float) -> float:
-    return (1 + tea) ** (1 / 12.0) - 1.0
+    """Convierte TEA a TEM: TEM = (1+TEA)^(1/12) - 1"""
+    return (1.0 + tea) ** (1.0 / 12.0) - 1.0
 
 
 def french_payment(principal: float, i_m: float, n: int) -> float:
+    """
+    Cuota fija (método francés) usando la tasa efectiva del período (i_m = TEP):
+      R = P * [ i * (1+i)^n ] / [ (1+i)^n - 1 ]  (si i > 0)
+      R = P / n  (si i = 0)
+    """
     if n <= 0:
         return 0.0
     if i_m == 0:
         return principal / n
-    return principal * (i_m * (1 + i_m) ** n) / ((1 + i_m) ** n - 1)
+    return principal * (i_m * (1.0 + i_m) ** n) / ((1.0 + i_m) ** n - 1.0)
 
 
 def build_schedule(
