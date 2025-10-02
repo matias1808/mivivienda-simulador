@@ -18,11 +18,10 @@ import streamlit as st
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
 
 # ---------------------------------------------------------------------
-# Base de datos
+# Base de datos (en /tmp para que sea escribible en la nube)
 # ---------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_conn():
-    # En la nube, el workspace puede ser read-only → usamos /tmp
     db_path = None
     try:
         db_path = st.secrets.get("DB_PATH", None)
@@ -30,7 +29,7 @@ def get_conn():
         db_path = None
     db_path = os.environ.get("DB_PATH", db_path)
     if not db_path:
-        db_path = os.path.join(tempfile.gettempdir(), "mivivienda.db")  # /tmp/mivivienda.db
+        db_path = os.path.join(tempfile.gettempdir(), "mivivienda.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         conn.execute("PRAGMA foreign_keys=ON")
@@ -51,7 +50,6 @@ def init_db():
             created_at TEXT
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clients(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +66,6 @@ def init_db():
             updated_at TEXT
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS units(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +76,6 @@ def init_db():
             updated_at TEXT
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cases(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,7 +90,6 @@ def init_db():
         )
     """)
 
-    # Índices y migraciones
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_doc_id ON clients(doc_id)")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_code ON units(code)")
     cur.execute("PRAGMA table_info(units)")
@@ -108,7 +103,7 @@ def init_db():
 conn = init_db()
 
 # ---------------------------------------------------------------------
-# Usuarios (demo)
+# Usuarios (demo simple)
 # ---------------------------------------------------------------------
 def hash_password(p: str) -> str:
     return hashlib.sha256(p.encode()).hexdigest()
@@ -138,24 +133,20 @@ if cur.fetchone()[0] == 0:
 # Finanzas
 # ---------------------------------------------------------------------
 def nominal_to_effective_monthly(tna: float, cap_per_year: int) -> float:
-    """ Puente TNA→TEA→TEM:  TEA=(1+TNA/m)^m -1 ; TEM=(1+TEA)^(1/12)-1 """
+    """TNA→TEA→TEM"""
     m = max(1, int(cap_per_year))
     tea = (1.0 + (tna / m)) ** m - 1.0
     tem = (1.0 + tea) ** (1.0 / 12.0) - 1.0
     return tem
 
 def tea_to_monthly(tea: float) -> float:
-    """ TEM = (1+TEA)^(1/12) - 1 """
     return (1.0 + tea) ** (1.0 / 12.0) - 1.0
 
 def french_payment(P: float, i_m: float, n: int) -> float:
-    """
-    Método francés (vencido):
-      R = P * [ i(1+i)^n ] / [ (1+i)^n - 1 ]  si i>0
-      R = P / n                                si i=0
-    """
-    if n <= 0: return 0.0
-    if i_m == 0: return P / n
+    if n <= 0:
+        return 0.0
+    if i_m == 0:
+        return P / n
     return P * (i_m * (1.0 + i_m) ** n) / ((1.0 + i_m) ** n - 1.0)
 
 def build_schedule(
@@ -176,7 +167,7 @@ def build_schedule(
         start_date = datetime.today()
 
     rows = []
-    flujo_t0 = principal - fee_opening  # flujo cliente positivo (ingreso)
+    flujo_t0 = principal - fee_opening
     rows.append({
         "Periodo": 0, "Fecha": start_date.strftime("%Y-%m-%d"),
         "Saldo Inicial": 0.0, "Interés": 0.0, "Amortización": 0.0,
@@ -193,20 +184,20 @@ def build_schedule(
         date_i = date_i + timedelta(days=30)  # 30/360
         interes = saldo * i_m
 
-        if t <= grace_total:  # gracia total: capitaliza intereses
+        if t <= grace_total:
             amort = 0.0
             cuota = 0.0
             saldo_final = saldo + interes
             pago_cliente = -(monthly_insurance + monthly_admin_fee)
-        elif t <= grace_total + grace_partial:  # gracia parcial: paga solo interés
+        elif t <= grace_total + grace_partial:
             amort = 0.0
             cuota = interes
             saldo_final = saldo
             pago_cliente = -(cuota + monthly_insurance + monthly_admin_fee)
-        else:  # amortización francesa
+        else:
             cuota = cuota_fija
             amort = cuota - interes
-            if t == total_months:  # corregir residuo final
+            if t == total_months:
                 amort = saldo
                 cuota = interes + amort
             saldo_final = saldo - amort
@@ -257,7 +248,7 @@ with st.sidebar:
             if st.button("Entrar"):
                 if check_login(u, p):
                     st.session_state.auth = {"logged": True, "user": u}
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("Credenciales inválidas")
         with tabs[1]:
@@ -276,7 +267,7 @@ with st.sidebar:
         st.write(f"👤 {st.session_state.auth['user']}")
         if st.button("Cerrar sesión"):
             st.session_state.clear()
-            st.experimental_rerun()
+            st.rerun()
 
 if not st.session_state.auth.get("logged"):
     st.stop()
@@ -295,7 +286,7 @@ sec1, sec2, sec3, sec4 = st.tabs([
 ])
 
 # ---------------------------------------------------------------------
-# 1) Cliente y Unidad (CRUD con borrado robusto)
+# 1) Cliente y Unidad (CRUD robusto)
 # ---------------------------------------------------------------------
 with sec1:
     st.subheader("Datos del cliente")
@@ -306,7 +297,7 @@ with sec1:
     client_labels = ["➕ Nuevo cliente"] + [f"{c[1]} – {c[2]} (ID {c[0]})" for c in clients_list]
     client_choice = st.selectbox("Editar cliente", client_labels, index=0)
 
-    # Cargar/estado
+    # Estado del formulario
     doc_id = ""; full_name = ""; income_monthly = 0.0; dependents = 0
     phone = ""; email = ""; employment_type = "Dependiente"; notes_client = ""
     editing_client_id = None
@@ -380,19 +371,19 @@ with sec1:
                          employment_type, notes_client, st.session_state.auth["user"], now, now))
                 get_conn().commit()
                 st.success("Cliente guardado")
-                st.experimental_rerun()
+                st.rerun()
             except sqlite3.IntegrityError:
                 st.error("Documento duplicado: ya existe un cliente con ese documento")
             except Exception as e:
                 st.error("No se pudo guardar el cliente: " + str(e))
 
-    # ---------- BORRAR CLIENTE (flujo robusto con estado) ----------
+    # ---------- BORRAR CLIENTE (persistiendo ID en session_state) ----------
     if "pending_delete_client_id" not in st.session_state:
         st.session_state.pending_delete_client_id = None
 
     if btn_delete_client and editing_client_id:
         st.session_state.pending_delete_client_id = int(editing_client_id)
-        st.experimental_rerun()
+        st.rerun()
 
     if st.session_state.pending_delete_client_id is not None:
         _cid = st.session_state.pending_delete_client_id
@@ -402,8 +393,7 @@ with sec1:
         cur.execute("SELECT COUNT(*) FROM cases WHERE client_id=?", (_cid,))
         cnt = cur.fetchone()[0]
 
-        st.warning(f"¿Eliminar **cliente** ID={_cid} "
-                   f"({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
+        st.warning(f"¿Eliminar **cliente** ID={_cid} ({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
         if cnt > 0:
             st.info(f"Este cliente tiene **{cnt}** caso(s) asociado(s).")
             confirm_chk = st.checkbox("Sí, eliminar también sus casos.", key="del_client_chk")
@@ -418,7 +408,7 @@ with sec1:
 
         if cancel_delete:
             st.session_state.pending_delete_client_id = None
-            st.experimental_rerun()
+            st.rerun()
 
         if do_delete and confirm_chk:
             try:
@@ -428,7 +418,7 @@ with sec1:
                 get_conn().commit()
                 st.session_state.pending_delete_client_id = None
                 st.success("Cliente eliminado correctamente.")
-                st.experimental_rerun()
+                st.rerun()
             except Exception as e:
                 st.error("No se pudo borrar el cliente: " + str(e))
 
@@ -474,19 +464,19 @@ with sec1:
                                 (code, project, st.session_state.auth["user"], now, now))
                 get_conn().commit()
                 st.success("Unidad guardada")
-                st.experimental_rerun()
+                st.rerun()
             except sqlite3.IntegrityError:
                 st.error("Código duplicado: ya existe una unidad con ese código")
             except Exception as e:
                 st.error("No se pudo guardar la unidad: " + str(e))
 
-    # ---------- BORRAR UNIDAD (flujo robusto con estado) ----------
+    # ---------- BORRAR UNIDAD (persistiendo ID en session_state) ----------
     if "pending_delete_unit_id" not in st.session_state:
         st.session_state.pending_delete_unit_id = None
 
     if btn_delete_unit and editing_unit_id:
         st.session_state.pending_delete_unit_id = int(editing_unit_id)
-        st.experimental_rerun()
+        st.rerun()
 
     if st.session_state.pending_delete_unit_id is not None:
         _uid = st.session_state.pending_delete_unit_id
@@ -496,8 +486,7 @@ with sec1:
         cur.execute("SELECT COUNT(*) FROM cases WHERE unit_id=?", (_uid,))
         cnt = cur.fetchone()[0]
 
-        st.warning(f"¿Eliminar **unidad** ID={_uid} "
-                   f"({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
+        st.warning(f"¿Eliminar **unidad** ID={_uid} ({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
         if cnt > 0:
             st.info(f"Esta unidad tiene **{cnt}** caso(s) asociado(s).")
             confirm_chk_u = st.checkbox("Sí, eliminar también sus casos.", key="del_unit_chk")
@@ -512,7 +501,7 @@ with sec1:
 
         if cancel_delete_u:
             st.session_state.pending_delete_unit_id = None
-            st.experimental_rerun()
+            st.rerun()
 
         if do_delete_u and confirm_chk_u:
             try:
@@ -522,7 +511,7 @@ with sec1:
                 get_conn().commit()
                 st.session_state.pending_delete_unit_id = None
                 st.success("Unidad eliminada correctamente.")
-                st.experimental_rerun()
+                st.rerun()
             except Exception as e:
                 st.error("No se pudo borrar la unidad: " + str(e))
 
@@ -664,7 +653,7 @@ with sec4:
                     cur.execute("DELETE FROM cases WHERE id=?", (case_id,))
                     get_conn().commit()
                     st.success("Caso eliminado")
-                    st.experimental_rerun()  # cortar ejecución y recargar
+                    st.rerun()
                 except Exception as e:
                     st.error("No se pudo borrar el caso: " + str(e))
                     st.stop()
@@ -681,8 +670,7 @@ with sec4:
 
         if row and row[4]:
             case_name, client_name, code_u, proj_u, params_json = row
-            # REEMPLAZO de read_json literal → json.loads + pd.Series (evita FutureWarning)
-            params = pd.Series(json.loads(params_json))
+            params = pd.Series(json.loads(params_json))   # ← sin FutureWarning
 
             df2 = build_schedule(
                 principal=params["principal"],
