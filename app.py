@@ -18,6 +18,7 @@ import sqlite3
 import hashlib
 import re
 from datetime import datetime, timedelta
+from io import BytesIO
 
 # ----------------------------- Config general -----------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
@@ -261,6 +262,18 @@ def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 100, tol: fl
             return float(r_new)
         r = r_new
     return np.nan
+
+# Utilitario: exportar DataFrame a XLSX (bytes en memoria)
+@st.cache_data(show_spinner=False)
+def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Cronograma") -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        # Opcional: formateo simple de ancho de columnas
+        for i, col in enumerate(df.columns):
+            width = max(12, min(30, int(df[col].astype(str).map(len).max() + 2)))
+            writer.sheets[sheet_name].set_column(i, i, width)
+    return output.getvalue()
 
 # ----------------------------- UI: Autenticación -----------------------------
 if "auth" not in st.session_state:
@@ -568,7 +581,8 @@ with sec3:
         )
 
         csv = df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("⬇️ Descargar cronograma CSV", csv, file_name="cronograma_mivivienda.csv", mime="text/csv")
+        xlsx_bytes = df_to_xlsx_bytes(df)
+        st.download_button("⬇️ Descargar cronograma XLSX", xlsx_bytes, file_name="cronograma_mivivienda.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.markdown("---")
         st.subheader("Guardar caso")
@@ -666,7 +680,6 @@ with sec3:
                     with st.expander("📄 Detalle del caso cargado", expanded=True):
                         st.write(f"**Caso**: #{case_id} – {case_name}")
                         st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
-                        st.json(dict(params))
 
                     # === Mostrar TABLA del cronograma inmediatamente ===
                     st.markdown("### 📅 Cronograma del caso cargado")
@@ -683,11 +696,11 @@ with sec3:
                             "Flujo Cliente": "{:,.2f}",
                         }), use_container_width=True
                     )
-                    csv2 = df2.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button("⬇️ Descargar cronograma (caso cargado)", csv2, file_name=f"cronograma_caso_{case_id}.csv", mime="text/csv")
+                    xlsx2 = df_to_xlsx_bytes(df2, sheet_name=f"Caso_{case_id}")
+                    st.download_button("⬇️ Descargar cronograma (XLSX)", xlsx2, file_name=f"cronograma_caso_{case_id}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 else:
                     st.error("No se pudo leer el caso seleccionado")
-
+                
 st.markdown("""
 ---
 **Transparencia – referencias técnicas**  
