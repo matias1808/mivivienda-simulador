@@ -1,35 +1,28 @@
 # app.py
 # -*- coding: utf-8 -*-
-"""
-Simulador MiVivienda / Techo Propio – Método Francés Vencido (meses de 30 días)
-Compatible con Streamlit Community Cloud (https://streamlit.io/cloud)
-
-Ajustes por nuevas observaciones:
-- Registro de usuario **sin mensajes** de éxito (flujo silencioso con `st.rerun`).
-- Regla: **Gracia parcial no puede ser mayor que la gracia total** (bloquea cálculo y muestra error).
-- Unidad inmobiliaria: **solo campo Código** (se quita "Proyecto/Nombre" de la UI y de las etiquetas visibles).
-- Se refuerza la sección **Guardar/Cargar caso** para que siempre aparezca tras generar cronograma.
-"""
-
-import streamlit as st
-import pandas as pd
-import numpy as np
-import sqlite3
-import hashlib
-import re
-from datetime import datetime, timedelta
-from io import BytesIO
 import os
+import re
+import json
+import hashlib
+import sqlite3
+import tempfile
+from datetime import datetime, timedelta
 
-# ----------------------------- Config general -----------------------------
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# ---------------------------------------------------------------------
+# Configuración general
+# ---------------------------------------------------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
 
-# ----------------------------- Utilitarios DB -----------------------------
+# ---------------------------------------------------------------------
+# Base de datos
+# ---------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_conn():
-    import os, tempfile
-    # En Streamlit Cloud el workspace del código es de solo lectura.
-    # Usamos un directorio **escribible** (\"/tmp\") por defecto, o un DB_PATH si está configurado.
+    # En la nube, el workspace puede ser read-only → usamos /tmp
     db_path = None
     try:
         db_path = st.secrets.get("DB_PATH", None)
@@ -37,29 +30,30 @@ def get_conn():
         db_path = None
     db_path = os.environ.get("DB_PATH", db_path)
     if not db_path:
-        db_path = os.path.join(tempfile.gettempdir(), "mivivienda.db")  # típicamente /tmp/mivivienda.db
+        db_path = os.path.join(tempfile.gettempdir(), "mivivienda.db")  # /tmp/mivivienda.db
     conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        pass
     return conn
 
 @st.cache_resource(show_spinner=False)
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-    # Usuarios
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
             password_hash TEXT,
             created_at TEXT
         )
-        """
-    )
-    # Clientes
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS clients (
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS clients(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             doc_id TEXT UNIQUE,
             full_name TEXT,
@@ -73,12 +67,10 @@ def init_db():
             created_at TEXT,
             updated_at TEXT
         )
-        """
-    )
-    # Unidades inmobiliarias (código + nombre)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS units (
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS units(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT UNIQUE,
             project TEXT,
@@ -86,12 +78,10 @@ def init_db():
             created_at TEXT,
             updated_at TEXT
         )
-        """
-    )
-    # Casos guardados
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cases (
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cases(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user TEXT,
             client_id INTEGER,
@@ -99,90 +89,74 @@ def init_db():
             case_name TEXT,
             params_json TEXT,
             created_at TEXT,
-            FOREIGN KEY (client_id) REFERENCES clients(id),
-            FOREIGN KEY (unit_id) REFERENCES units(id)
+            FOREIGN KEY(client_id) REFERENCES clients(id),
+            FOREIGN KEY(unit_id) REFERENCES units(id)
         )
-        """
-    )
+    """)
 
-    # ---------------- M I G R A C I O N E S ----------------
-    # Asegura que la columna 'project' exista en units (por si vienes de versiones previas)
-    cur.execute("PRAGMA table_info(units)")
-    cols = [r[1] for r in cur.fetchall()]
-    if 'project' not in cols:
-        cur.execute("ALTER TABLE units ADD COLUMN project TEXT")
-
-    # Asegura índices útiles
+    # Índices y migraciones
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_doc_id ON clients(doc_id)")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_code ON units(code)")
+    cur.execute("PRAGMA table_info(units)")
+    cols = [r[1] for r in cur.fetchall()]
+    if "project" not in cols:
+        cur.execute("ALTER TABLE units ADD COLUMN project TEXT")
 
     conn.commit()
     return conn
 
 conn = init_db()
-# Enforce FK behavior at runtime
-try:
-    conn.execute("PRAGMA foreign_keys=ON")
-except Exception:
-    pass
 
-# ----------------------------- Seguridad -----------------------------
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+# ---------------------------------------------------------------------
+# Usuarios (demo)
+# ---------------------------------------------------------------------
+def hash_password(p: str) -> str:
+    return hashlib.sha256(p.encode()).hexdigest()
 
-def create_user(username: str, password: str) -> bool:
+def create_user(u: str, p: str) -> bool:
     try:
         cur = get_conn().cursor()
-        cur.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
-                    (username, hash_password(password), datetime.utcnow().isoformat()))
+        cur.execute("INSERT INTO users(username, password_hash, created_at) VALUES(?,?,?)",
+                    (u, hash_password(p), datetime.utcnow().isoformat()))
         get_conn().commit()
         return True
     except sqlite3.IntegrityError:
         return False
 
-
-def check_login(username: str, password: str) -> bool:
+def check_login(u: str, p: str) -> bool:
     cur = get_conn().cursor()
-    cur.execute("SELECT password_hash FROM users WHERE username=?", (username,))
+    cur.execute("SELECT password_hash FROM users WHERE username=?", (u,))
     row = cur.fetchone()
-    return bool(row and row[0] == hash_password(password))
+    return bool(row and row[0] == hash_password(p))
 
-# Usuario demo si está vacío
 cur = get_conn().cursor()
 cur.execute("SELECT COUNT(*) FROM users")
 if cur.fetchone()[0] == 0:
     create_user("admin", "admin")
 
-# ----------------------------- Cálculos financieros -----------------------------
+# ---------------------------------------------------------------------
+# Finanzas
+# ---------------------------------------------------------------------
 def nominal_to_effective_monthly(tna: float, cap_per_year: int) -> float:
-    """
-    Convierte TNA con capitalización m/año a tasa efectiva mensual (TEM),
-    siguiendo el "puente" por tasa efectiva anual (TEA):
-      TEA = (1 + TNA/m)^m - 1  →  TEM = (1 + TEA)^(1/12) - 1
-    """
+    """ Puente TNA→TEA→TEM:  TEA=(1+TNA/m)^m -1 ; TEM=(1+TEA)^(1/12)-1 """
     m = max(1, int(cap_per_year))
     tea = (1.0 + (tna / m)) ** m - 1.0
     tem = (1.0 + tea) ** (1.0 / 12.0) - 1.0
     return tem
 
-
 def tea_to_monthly(tea: float) -> float:
-    """Convierte TEA a TEM: TEM = (1+TEA)^(1/12) - 1"""
+    """ TEM = (1+TEA)^(1/12) - 1 """
     return (1.0 + tea) ** (1.0 / 12.0) - 1.0
 
-
-def french_payment(principal: float, i_m: float, n: int) -> float:
+def french_payment(P: float, i_m: float, n: int) -> float:
     """
-    Cuota fija (método francés) usando la tasa efectiva del período (i_m = TEP):
-      R = P * [ i * (1+i)^n ] / [ (1+i)^n - 1 ]  (si i > 0)
-      R = P / n  (si i = 0)
+    Método francés (vencido):
+      R = P * [ i(1+i)^n ] / [ (1+i)^n - 1 ]  si i>0
+      R = P / n                                si i=0
     """
-    if n <= 0:
-        return 0.0
-    if i_m == 0:
-        return principal / n
-    return principal * (i_m * (1.0 + i_m) ** n) / ((1.0 + i_m) ** n - 1.0)
-
+    if n <= 0: return 0.0
+    if i_m == 0: return P / n
+    return P * (i_m * (1.0 + i_m) ** n) / ((1.0 + i_m) ** n - 1.0)
 
 def build_schedule(
     principal: float,
@@ -195,25 +169,19 @@ def build_schedule(
     monthly_insurance: float = 0.0,
     monthly_admin_fee: float = 0.0,
     bono_monto: float = 0.0,
-    ) -> pd.DataFrame:
+) -> pd.DataFrame:
+
     principal_neto = max(0.0, principal - bono_monto)
     if start_date is None:
         start_date = datetime.today()
 
     rows = []
-    flujo_t0 = principal - fee_opening
+    flujo_t0 = principal - fee_opening  # flujo cliente positivo (ingreso)
     rows.append({
-        "Periodo": 0,
-        "Fecha": start_date.strftime("%Y-%m-%d"),
-        "Saldo Inicial": 0.0,
-        "Interés": 0.0,
-        "Amortización": 0.0,
-        "Cuota": 0.0,
-        "Seguro": 0.0,
-        "Gasto Adm": 0.0,
-        "Cuota Total": 0.0,
-        "Saldo Final": principal_neto,
-        "Flujo Cliente": flujo_t0
+        "Periodo": 0, "Fecha": start_date.strftime("%Y-%m-%d"),
+        "Saldo Inicial": 0.0, "Interés": 0.0, "Amortización": 0.0,
+        "Cuota": 0.0, "Seguro": 0.0, "Gasto Adm": 0.0, "Cuota Total": 0.0,
+        "Saldo Final": principal_neto, "Flujo Cliente": flujo_t0
     })
 
     saldo = principal_neto
@@ -225,47 +193,38 @@ def build_schedule(
         date_i = date_i + timedelta(days=30)  # 30/360
         interes = saldo * i_m
 
-        if t <= grace_total:  # Gracia total: capitaliza interés
+        if t <= grace_total:  # gracia total: capitaliza intereses
             amort = 0.0
             cuota = 0.0
             saldo_final = saldo + interes
             pago_cliente = -(monthly_insurance + monthly_admin_fee)
-        elif t <= grace_total + grace_partial:  # Gracia parcial: paga solo interés
+        elif t <= grace_total + grace_partial:  # gracia parcial: paga solo interés
             amort = 0.0
             cuota = interes
             saldo_final = saldo
             pago_cliente = -(cuota + monthly_insurance + monthly_admin_fee)
-        else:  # Amortización francesa
+        else:  # amortización francesa
             cuota = cuota_fija
             amort = cuota - interes
-            if t == total_months:  # limpiar residuo final
+            if t == total_months:  # corregir residuo final
                 amort = saldo
                 cuota = interes + amort
             saldo_final = saldo - amort
             pago_cliente = -(cuota + monthly_insurance + monthly_admin_fee)
 
         rows.append({
-            "Periodo": t,
-            "Fecha": date_i.strftime("%Y-%m-%d"),
-            "Saldo Inicial": saldo,
-            "Interés": interes,
-            "Amortización": amort,
-            "Cuota": cuota,
-            "Seguro": monthly_insurance,
-            "Gasto Adm": monthly_admin_fee,
+            "Periodo": t, "Fecha": date_i.strftime("%Y-%m-%d"),
+            "Saldo Inicial": saldo, "Interés": interes, "Amortización": amort,
+            "Cuota": cuota, "Seguro": monthly_insurance, "Gasto Adm": monthly_admin_fee,
             "Cuota Total": cuota + monthly_insurance + monthly_admin_fee,
-            "Saldo Final": saldo_final,
-            "Flujo Cliente": pago_cliente,
+            "Saldo Final": saldo_final, "Flujo Cliente": pago_cliente
         })
-
         saldo = saldo_final
 
     return pd.DataFrame(rows)
 
-
 def npv(rate: float, cashflows: np.ndarray) -> float:
     return float(np.sum(cashflows / (1 + rate) ** np.arange(len(cashflows))))
-
 
 def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 100, tol: float = 1e-7) -> float:
     r = guess
@@ -282,110 +241,81 @@ def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 100, tol: fl
         r = r_new
     return np.nan
 
-# Utilitario: exportar DataFrame a XLSX (bytes en memoria)
-@st.cache_data(show_spinner=False)
-def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Cronograma") -> bytes:
-    output = BytesIO()
-    # Intentar con xlsxwriter; si no está, usar openpyxl; si nada, devolver CSV para no romper
-    engine = None
-    try:
-        import xlsxwriter  # noqa: F401
-        engine = "xlsxwriter"
-    except Exception:
-        try:
-            import openpyxl  # noqa: F401
-            engine = "openpyxl"
-        except Exception:
-            engine = None
-    if engine is None:
-        return df.to_csv(index=False).encode("utf-8-sig")
-
-    with pd.ExcelWriter(output, engine=engine) as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-        try:
-            ws = writer.sheets[sheet_name]
-            for i, col in enumerate(df.columns):
-                width = max(12, min(30, int(df[col].astype(str).map(len).max() + 2)))
-                if engine == "xlsxwriter":
-                    ws.set_column(i, i, width)
-                elif engine == "openpyxl":
-                    ws.column_dimensions[ws.cell(row=1, column=i+1).column_letter].width = width
-        except Exception:
-            pass
-    return output.getvalue()
-
-# ----------------------------- UI: Autenticación -----------------------------
+# ---------------------------------------------------------------------
+# Autenticación (sidebar)
+# ---------------------------------------------------------------------
 if "auth" not in st.session_state:
     st.session_state.auth = {"logged": False, "user": None}
 
 with st.sidebar:
     st.header("🔐 Acceso")
     if not st.session_state.auth["logged"]:
-        login_tab, signup_tab = st.tabs(["Iniciar sesión", "Registrarse"])
-        with login_tab:
+        tabs = st.tabs(["Iniciar sesión", "Registrarse"])
+        with tabs[0]:
             u = st.text_input("Usuario")
             p = st.text_input("Contraseña", type="password")
-            if st.button("Entrar", width='stretch'):
+            if st.button("Entrar"):
                 if check_login(u, p):
                     st.session_state.auth = {"logged": True, "user": u}
-                    st.rerun()
+                    st.experimental_rerun()
                 else:
                     st.error("Credenciales inválidas")
-        with signup_tab:
+        with tabs[1]:
             u2 = st.text_input("Nuevo usuario")
             p2 = st.text_input("Nueva contraseña", type="password")
-            if st.button("Crear cuenta", width='stretch'):
+            if st.button("Crear cuenta"):
                 if u2 and p2:
                     ok = create_user(u2, p2)
                     if ok:
-                        # Sin mensajes: recargar de forma silenciosa
-                        st.rerun()
+                        st.success("Usuario creado, ahora inicia sesión")
                     else:
-                        st.error("El usuario ya existe.")
+                        st.error("El usuario ya existe")
                 else:
                     st.warning("Complete usuario y contraseña")
     else:
         st.write(f"👤 {st.session_state.auth['user']}")
-        if st.button("Cerrar sesión", width='stretch'):
+        if st.button("Cerrar sesión"):
             st.session_state.clear()
-            st.rerun()
+            st.experimental_rerun()
 
 if not st.session_state.auth.get("logged"):
     st.stop()
 
-# ----------------------------- UI principal -----------------------------
+# ---------------------------------------------------------------------
+# UI principal
+# ---------------------------------------------------------------------
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
 st.caption("Empresa inmobiliaria – cálculo de cronograma, VAN/TIR/TCEA y gestión de clientes & unidades")
 
-sec1, sec2, sec3, sec4 = st.tabs(["1) Cliente y Unidad", "2) Configurar Préstamo", "3) Vincular & Guardar caso", "4) Casos & KPIs"])
+sec1, sec2, sec3, sec4 = st.tabs([
+    "1) Cliente y Unidad",
+    "2) Configurar Préstamo",
+    "3) Vincular & Guardar caso",
+    "4) Casos & KPIs",
+])
 
-# ----------------------------- 1) Cliente y Unidad -----------------------------
+# ---------------------------------------------------------------------
+# 1) Cliente y Unidad (CRUD con borrado robusto)
+# ---------------------------------------------------------------------
 with sec1:
     st.subheader("Datos del cliente")
 
-    # Selector de cliente existente para edición
     cur = get_conn().cursor()
     cur.execute("SELECT id, doc_id, full_name FROM clients ORDER BY full_name ASC")
     clients_list = cur.fetchall()
     client_labels = ["➕ Nuevo cliente"] + [f"{c[1]} – {c[2]} (ID {c[0]})" for c in clients_list]
     client_choice = st.selectbox("Editar cliente", client_labels, index=0)
 
-    # Inicialización de campos
-    doc_id = ""
-    full_name = ""
-    income_monthly = 0.0
-    dependents = 0
-    phone = ""
-    email = ""
-    employment_type = "Dependiente"
-    notes_client = ""
+    # Cargar/estado
+    doc_id = ""; full_name = ""; income_monthly = 0.0; dependents = 0
+    phone = ""; email = ""; employment_type = "Dependiente"; notes_client = ""
     editing_client_id = None
 
     if client_choice != "➕ Nuevo cliente":
         idx = client_labels.index(client_choice) - 1
-        c = clients_list[idx]
-        editing_client_id = c[0]
-        cur.execute("SELECT doc_id, full_name, phone, email, income_monthly, dependents, employment_type, notes FROM clients WHERE id=?", (editing_client_id,))
+        c = clients_list[idx]; editing_client_id = c[0]
+        cur.execute("""SELECT doc_id, full_name, phone, email, income_monthly, dependents,
+                              employment_type, notes FROM clients WHERE id=?""", (editing_client_id,))
         row = cur.fetchone()
         if row:
             doc_id, full_name, phone, email, income_monthly, dependents, employment_type, notes_client = row
@@ -394,12 +324,17 @@ with sec1:
     with colc1:
         doc_id = st.text_input("Documento (OBLIGATORIO)", value=doc_id)
         full_name = st.text_input("Nombre completo (OBLIGATORIO)", value=full_name)
-        income_monthly = st.number_input("Ingreso mensual (OBLIGATORIO)", min_value=0.0, step=100.0, value=float(income_monthly))
-        dependents = st.number_input("Dependientes (OBLIGATORIO)", min_value=0, step=1, value=int(dependents))
+        income_monthly = st.number_input("Ingreso mensual (OBLIGATORIO)", min_value=0.0, step=100.0,
+                                         value=float(income_monthly))
+        dependents = st.number_input("Dependientes (OBLIGATORIO)", min_value=0, step=1,
+                                     value=int(dependents))
     with colc2:
-        phone = st.text_input("Teléfono 9 dígitos (OBLIGATORIO)", value=phone, help="Ej.: 912345678")
-        email = st.text_input("Email (OBLIGATORIO)", value=email, help="Formato: xyz@xyz.com")
-        employment_type = st.selectbox("Tipo de empleo (OBLIGATORIO)", ["Dependiente", "Independiente", "Mixto", "Otro"], index=["Dependiente","Independiente","Mixto","Otro"].index(employment_type) if employment_type in ["Dependiente","Independiente","Mixto","Otro"] else 0)
+        phone = st.text_input("Teléfono 9 dígitos (OBLIGATORIO)", value=phone)
+        email = st.text_input("Email (OBLIGATORIO)", value=email)
+        employment_type = st.selectbox("Tipo de empleo (OBLIGATORIO)",
+            ["Dependiente", "Independiente", "Mixto", "Otro"],
+            index=["Dependiente","Independiente","Mixto","Otro"].index(employment_type)
+                  if employment_type in ["Dependiente","Independiente","Mixto","Otro"] else 0)
     with colc3:
         notes_client = st.text_area("Notas socioeconómicas", value=notes_client)
         c1, c2 = st.columns(2)
@@ -416,128 +351,107 @@ with sec1:
 
     if btn_save_client:
         missing = []
-        if not doc_id:
-            missing.append("Documento")
-        if not full_name:
-            missing.append("Nombre completo")
-        if income_monthly <= 0:
-            missing.append("Ingreso mensual > 0")
-        if dependents < 0:
-            missing.append("Dependientes")
-        if not valid_phone_pe(phone):
-            missing.append("Teléfono 9 dígitos")
-        if not valid_email(email):
-            missing.append("Email válido")
-        if not employment_type:
-            missing.append("Tipo de empleo")
+        if not doc_id: missing.append("Documento")
+        if not full_name: missing.append("Nombre completo")
+        if income_monthly <= 0: missing.append("Ingreso mensual > 0")
+        if dependents < 0: missing.append("Dependientes")
+        if not valid_phone_pe(phone): missing.append("Teléfono 9 dígitos")
+        if not valid_email(email): missing.append("Email válido")
+        if not employment_type: missing.append("Tipo de empleo")
 
         if missing:
             st.error("Complete correctamente: " + ", ".join(missing))
         else:
             now = datetime.utcnow().isoformat()
-            cur = get_conn().cursor()
             try:
+                cur = get_conn().cursor()
                 if editing_client_id:
-                    cur.execute(
-                        """
+                    cur.execute("""
                         UPDATE clients SET doc_id=?, full_name=?, phone=?, email=?, income_monthly=?, dependents=?,
-                        employment_type=?, notes=?, updated_at=? WHERE id=?
-                        """,
-                        (
-                            doc_id,
-                            full_name,
-                            phone,
-                            email,
-                            income_monthly,
-                            dependents,
-                            employment_type,
-                            notes_client,
-                            now,
-                            editing_client_id,
-                        ),
-                    )
+                        employment_type=?, notes=?, updated_at=? WHERE id=?""",
+                        (doc_id, full_name, phone, email, income_monthly, dependents,
+                         employment_type, notes_client, now, editing_client_id))
                 else:
-                    cur.execute(
-                        """
-                        INSERT INTO clients (doc_id, full_name, phone, email, income_monthly, dependents,
+                    cur.execute("""
+                        INSERT INTO clients(doc_id, full_name, phone, email, income_monthly, dependents,
                         employment_type, notes, created_by, created_at, updated_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            doc_id,
-                            full_name,
-                            phone,
-                            email,
-                            income_monthly,
-                            dependents,
-                            employment_type,
-                            notes_client,
-                            st.session_state.auth["user"],
-                            now,
-                            now,
-                        ),
-                    )
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (doc_id, full_name, phone, email, income_monthly, dependents,
+                         employment_type, notes_client, st.session_state.auth["user"], now, now))
                 get_conn().commit()
                 st.success("Cliente guardado")
+                st.experimental_rerun()
             except sqlite3.IntegrityError:
                 st.error("Documento duplicado: ya existe un cliente con ese documento")
-            except sqlite3.OperationalError:
-                st.error("No se pudo guardar el cliente (error de base de datos)")
+            except Exception as e:
+                st.error("No se pudo guardar el cliente: " + str(e))
 
-    # Borrar cliente (CRUD)
-    if 'btn_delete_client' in locals() and btn_delete_client and editing_client_id:
+    # ---------- BORRAR CLIENTE (flujo robusto con estado) ----------
+    if "pending_delete_client_id" not in st.session_state:
+        st.session_state.pending_delete_client_id = None
+
+    if btn_delete_client and editing_client_id:
+        st.session_state.pending_delete_client_id = int(editing_client_id)
+        st.experimental_rerun()
+
+    if st.session_state.pending_delete_client_id is not None:
+        _cid = st.session_state.pending_delete_client_id
         cur = get_conn().cursor()
-        # verificar si tiene casos
-        cur.execute("SELECT COUNT(*) FROM cases WHERE client_id=?", (editing_client_id,))
+        cur.execute("SELECT full_name, doc_id FROM clients WHERE id=?", (_cid,))
+        info = cur.fetchone()
+        cur.execute("SELECT COUNT(*) FROM cases WHERE client_id=?", (_cid,))
         cnt = cur.fetchone()[0]
-        if cnt > 0:
-            st.warning(f"Este cliente tiene {cnt} caso(s) asociado(s). Marca la casilla para borrarlos también.")
-            confirm = st.checkbox("Eliminar en cascada los casos de este cliente", key="del_client_confirm")
-            if confirm and st.button("Confirmar borrado permanente", key="del_client_go"):
-                try:
-                    cur.execute("DELETE FROM cases WHERE client_id=?", (editing_client_id,))
-                    cur.execute("DELETE FROM clients WHERE id=?", (editing_client_id,))
-                    get_conn().commit()
-                    st.success("Cliente y casos asociados eliminados")
-                    st.rerun()
-                except Exception as e:
-                    st.error("No se pudo borrar: " + str(e))
-        else:
-            if st.button("Confirmar borrado permanente", key="del_client_go2"):
-                try:
-                    cur.execute("DELETE FROM clients WHERE id=?", (editing_client_id,))
-                    get_conn().commit()
-                    st.success("Cliente eliminado")
-                    st.rerun()
-                except Exception as e:
-                    st.error("No se pudo borrar: " + str(e))
 
+        st.warning(f"¿Eliminar **cliente** ID={_cid} "
+                   f"({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
+        if cnt > 0:
+            st.info(f"Este cliente tiene **{cnt}** caso(s) asociado(s).")
+            confirm_chk = st.checkbox("Sí, eliminar también sus casos.", key="del_client_chk")
+        else:
+            confirm_chk = True
+
+        col_dc1, col_dc2, _ = st.columns(3)
+        with col_dc1:
+            do_delete = st.button("✅ Confirmar borrado", key="del_client_confirm")
+        with col_dc2:
+            cancel_delete = st.button("✖️ Cancelar", key="del_client_cancel")
+
+        if cancel_delete:
+            st.session_state.pending_delete_client_id = None
+            st.experimental_rerun()
+
+        if do_delete and confirm_chk:
+            try:
+                if cnt > 0:
+                    cur.execute("DELETE FROM cases WHERE client_id=?", (_cid,))
+                cur.execute("DELETE FROM clients WHERE id=?", (_cid,))
+                get_conn().commit()
+                st.session_state.pending_delete_client_id = None
+                st.success("Cliente eliminado correctamente.")
+                st.experimental_rerun()
+            except Exception as e:
+                st.error("No se pudo borrar el cliente: " + str(e))
+
+    # -------------------- Unidades --------------------
     st.markdown("---")
     st.subheader("Unidad inmobiliaria")
 
-    # Traer unidades (código + nombre)
     cur.execute("SELECT id, code, project FROM units ORDER BY code ASC")
     units_list = cur.fetchall()
     unit_labels = ["➕ Nueva unidad"] + [f"{u[1]} – {u[2] or ''} (ID {u[0]})" for u in units_list]
     unit_choice = st.selectbox("Editar unidad (Código y Nombre)", unit_labels, index=0)
 
-    code = ""
-    project = ""
-    editing_unit_id = None
-
+    code = ""; project = ""; editing_unit_id = None
     if unit_choice != "➕ Nueva unidad":
         idx = unit_labels.index(unit_choice) - 1
-        u = units_list[idx]
-        editing_unit_id = u[0]
-        code = u[1] or ""
-        project = u[2] or ""
+        u = units_list[idx]; editing_unit_id = u[0]
+        code = u[1] or ""; project = u[2] or ""
 
     colu1, colu2 = st.columns(2)
     with colu1:
         code = st.text_input("Código (OBLIGATORIO)", value=code)
     with colu2:
         project = st.text_input("Nombre (OBLIGATORIO)", value=project)
-
     c1u, c2u = st.columns(2)
     with c1u:
         btn_save_unit = st.button("💾 Guardar unidad")
@@ -549,55 +463,75 @@ with sec1:
             st.error("Complete Código y Nombre")
         else:
             now = datetime.utcnow().isoformat()
-            cur = get_conn().cursor()
             try:
+                cur = get_conn().cursor()
                 if editing_unit_id:
-                    cur.execute(
-                        "UPDATE units SET code=?, project=?, updated_at=? WHERE id=?",
-                        (code, project, now, editing_unit_id),
-                    )
+                    cur.execute("UPDATE units SET code=?, project=?, updated_at=? WHERE id=?",
+                                (code, project, now, editing_unit_id))
                 else:
-                    cur.execute(
-                        "INSERT INTO units (code, project, created_by, created_at, updated_at) VALUES (?,?,?,?,?)",
-                        (code, project, st.session_state.auth["user"], now, now),
-                    )
+                    cur.execute("INSERT INTO units(code, project, created_by, created_at, updated_at) "
+                                "VALUES(?,?,?,?,?)",
+                                (code, project, st.session_state.auth["user"], now, now))
                 get_conn().commit()
                 st.success("Unidad guardada")
+                st.experimental_rerun()
             except sqlite3.IntegrityError:
-                st.error("Código duplicado: ya existe una unidad con ese Código")
-            except sqlite3.OperationalError:
-                st.error("No se pudo guardar la unidad (error de base de datos)")
+                st.error("Código duplicado: ya existe una unidad con ese código")
+            except Exception as e:
+                st.error("No se pudo guardar la unidad: " + str(e))
 
-    # Borrar unidad
-    if 'btn_delete_unit' in locals() and btn_delete_unit and editing_unit_id:
+    # ---------- BORRAR UNIDAD (flujo robusto con estado) ----------
+    if "pending_delete_unit_id" not in st.session_state:
+        st.session_state.pending_delete_unit_id = None
+
+    if btn_delete_unit and editing_unit_id:
+        st.session_state.pending_delete_unit_id = int(editing_unit_id)
+        st.experimental_rerun()
+
+    if st.session_state.pending_delete_unit_id is not None:
+        _uid = st.session_state.pending_delete_unit_id
         cur = get_conn().cursor()
-        cur.execute("SELECT COUNT(*) FROM cases WHERE unit_id=?", (editing_unit_id,))
+        cur.execute("SELECT code, project FROM units WHERE id=?", (_uid,))
+        info = cur.fetchone()
+        cur.execute("SELECT COUNT(*) FROM cases WHERE unit_id=?", (_uid,))
         cnt = cur.fetchone()[0]
-        if cnt > 0:
-            st.warning(f"Esta unidad tiene {cnt} caso(s) asociado(s). Marca la casilla para borrarlos también.")
-            confirm_u = st.checkbox("Eliminar en cascada los casos de esta unidad", key="del_unit_confirm")
-            if confirm_u and st.button("Confirmar borrado permanente", key="del_unit_go"):
-                try:
-                    cur.execute("DELETE FROM cases WHERE unit_id=?", (editing_unit_id,))
-                    cur.execute("DELETE FROM units WHERE id=?", (editing_unit_id,))
-                    get_conn().commit()
-                    st.success("Unidad y casos asociados eliminados")
-                    st.rerun()
-                except Exception as e:
-                    st.error("No se pudo borrar: " + str(e))
-        else:
-            if st.button("Confirmar borrado permanente", key="del_unit_go2"):
-                try:
-                    cur.execute("DELETE FROM units WHERE id=?", (editing_unit_id,))
-                    get_conn().commit()
-                    st.success("Unidad eliminada")
-                    st.rerun()
-                except Exception as e:
-                    st.error("No se pudo borrar: " + str(e))
 
-# ----------------------------- 2) Configurar Préstamo -----------------------------
+        st.warning(f"¿Eliminar **unidad** ID={_uid} "
+                   f"({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
+        if cnt > 0:
+            st.info(f"Esta unidad tiene **{cnt}** caso(s) asociado(s).")
+            confirm_chk_u = st.checkbox("Sí, eliminar también sus casos.", key="del_unit_chk")
+        else:
+            confirm_chk_u = True
+
+        col_du1, col_du2, _ = st.columns(3)
+        with col_du1:
+            do_delete_u = st.button("✅ Confirmar borrado", key="del_unit_confirm")
+        with col_du2:
+            cancel_delete_u = st.button("✖️ Cancelar", key="del_unit_cancel")
+
+        if cancel_delete_u:
+            st.session_state.pending_delete_unit_id = None
+            st.experimental_rerun()
+
+        if do_delete_u and confirm_chk_u:
+            try:
+                if cnt > 0:
+                    cur.execute("DELETE FROM cases WHERE unit_id=?", (_uid,))
+                cur.execute("DELETE FROM units WHERE id=?", (_uid,))
+                get_conn().commit()
+                st.session_state.pending_delete_unit_id = None
+                st.success("Unidad eliminada correctamente.")
+                st.experimental_rerun()
+            except Exception as e:
+                st.error("No se pudo borrar la unidad: " + str(e))
+
+# ---------------------------------------------------------------------
+# 2) Configurar Préstamo
+# ---------------------------------------------------------------------
 with sec2:
     st.subheader("Configuración del préstamo")
+
     col1, col2, col3 = st.columns(3)
     with col1:
         currency = st.selectbox("Moneda", ["PEN", "USD"], index=0)
@@ -617,23 +551,19 @@ with sec2:
         monthly_insurance = st.number_input("Seguro mensual", min_value=0.0, step=10.0)
         monthly_admin_fee = st.number_input("Gasto admin mensual", min_value=0.0, step=10.0)
 
-    # Tasa efectiva mensual
     if tasa_tipo == "Efectiva (TEA)":
         i_m = tea_to_monthly(tasa_anual)
     else:
         i_m = nominal_to_effective_monthly(tasa_anual, cap_m)
 
-    st.caption(f"Tasa efectiva mensual: {i_m*100:.5f}% | Convención 30/360 | Pagos vencidos")
+    st.caption(f"Tasa efectiva mensual (TEM): {i_m*100:.5f}% | Convención 30/360 | Pagos vencidos")
 
-    # Nuevas validaciones
     if grace_partial > grace_total:
         st.error("La gracia parcial no puede ser mayor que la gracia total.")
     if grace_total + grace_partial >= term_months:
         st.warning("La suma de gracia total y parcial no puede ser ≥ al plazo total.")
 
-    compute = st.button("📅 Generar cronograma")
-
-    if compute:
+    if st.button("📅 Generar cronograma"):
         if grace_partial > grace_total:
             st.error("Corrija los meses de gracia: parcial > total.")
         elif grace_total + grace_partial >= term_months:
@@ -653,23 +583,18 @@ with sec2:
             )
             st.session_state["schedule_df"] = df
             st.session_state["schedule_cfg"] = {
-                "currency": currency,
-                "principal": principal,
-                "bono": bono,
-                "term_months": term_months,
-                "tasa_tipo": tasa_tipo,
-                "tasa_anual": tasa_anual,
-                "cap_m": cap_m,
-                "grace_total": grace_total,
-                "grace_partial": grace_partial,
-                "fee_opening": fee_opening,
-                "monthly_insurance": monthly_insurance,
-                "monthly_admin_fee": monthly_admin_fee,
-                "i_m": i_m,
+                "currency": currency, "principal": principal, "bono": bono,
+                "term_months": term_months, "tasa_tipo": tasa_tipo,
+                "tasa_anual": tasa_anual, "cap_m": cap_m,
+                "grace_total": grace_total, "grace_partial": grace_partial,
+                "fee_opening": fee_opening, "monthly_insurance": monthly_insurance,
+                "monthly_admin_fee": monthly_admin_fee, "i_m": i_m,
             }
-            st.success("Cronograma generado. Revise la pestaña 3)")
+            st.success("Cronograma generado. Ahora vincúlalo y guarda en la pestaña 3)")
 
-# ----------------------------- 3) Vincular & Guardar caso -----------------------------
+# ---------------------------------------------------------------------
+# 3) Vincular & Guardar caso
+# ---------------------------------------------------------------------
 with sec3:
     st.subheader("Vincular cliente + préstamo y guardar")
 
@@ -686,11 +611,11 @@ with sec3:
         sel_client_label_to_id = {f"{c[1]} (ID {c[0]})": c[0] for c in clients_for_save}
         sel_unit_label_to_id = {f"{u[1]} – {u[2]} (ID {u[0]})": u[0] for u in units_for_save}
 
-        client_label = st.selectbox("Cliente", options=["- Seleccione -"] + list(sel_client_label_to_id.keys()), key="link_client")
-        unit_label = st.selectbox("Unidad", options=["- Seleccione -"] + list(sel_unit_label_to_id.keys()), key="link_unit")
-        case_name = st.text_input("Nombre del caso", value="", key="link_case_name")
+        client_label = st.selectbox("Cliente", ["- Seleccione -"] + list(sel_client_label_to_id.keys()))
+        unit_label = st.selectbox("Unidad", ["- Seleccione -"] + list(sel_unit_label_to_id.keys()))
+        case_name = st.text_input("Nombre del caso", value="")
 
-        if st.button("💾 Guardar caso en base de datos", key="btn_save_case"):
+        if st.button("💾 Guardar caso en base de datos"):
             if client_label == "- Seleccione -" or unit_label == "- Seleccione -" or not case_name:
                 st.error("Seleccione cliente, unidad y defina un nombre para el caso")
             else:
@@ -698,72 +623,71 @@ with sec3:
                 unit_id = sel_unit_label_to_id[unit_label]
                 params = {**cfg, "generated_at": datetime.utcnow().isoformat()}
                 cur.execute(
-                    "INSERT INTO cases (user, client_id, unit_id, case_name, params_json, created_at) VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO cases(user, client_id, unit_id, case_name, params_json, created_at) "
+                    "VALUES(?,?,?,?,?,?)",
                     (
-                        st.session_state.auth["user"],
-                        client_id,
-                        unit_id,
-                        case_name,
-                        pd.Series(params).to_json(),
-                        datetime.utcnow().isoformat(),
+                        st.session_state.auth["user"], client_id, unit_id,
+                        case_name, pd.Series(params).to_json(), datetime.utcnow().isoformat()
                     ),
                 )
                 get_conn().commit()
                 st.success("Caso guardado correctamente")
 
-# ----------------------------- 4) Casos & KPIs -----------------------------
+# ---------------------------------------------------------------------
+# 4) Casos & KPIs (incluye borrar caso)
+# ---------------------------------------------------------------------
 with sec4:
     st.subheader("Casos guardados y KPIs del caso seleccionado")
 
-    # Borrar caso seleccionado (CRUD) arriba para visibilidad
-    cur_del = get_conn().cursor()
-
     cur = get_conn().cursor()
-    cur.execute(
-        """
+    cur.execute("""
         SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project
         FROM cases
         LEFT JOIN clients ON clients.id = cases.client_id
         LEFT JOIN units ON units.id = cases.unit_id
         ORDER BY cases.id DESC
-        """
-    )
+    """)
     rows = cur.fetchall()
+
     if not rows:
         st.info("Aún no hay casos guardados.")
     else:
         label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[3] or 'CODE?'} – {r[1]}": r[0] for r in rows}
         case_label = st.selectbox("Casos", options=list(label_to_caseid.keys()), key="kpi_case_selector")
         case_id = label_to_caseid[case_label]
-        del_col1, del_col2 = st.columns([1,3])
+
+        # Botón de BORRAR CASO (con rerun inmediato)
+        del_col1, del_col2 = st.columns([1, 3])
         with del_col1:
             if st.button("🗑️ Borrar este caso", key="btn_delete_case"):
                 try:
-                    cur_del.execute("DELETE FROM cases WHERE id=?", (case_id,))
+                    cur.execute("DELETE FROM cases WHERE id=?", (case_id,))
                     get_conn().commit()
                     st.success("Caso eliminado")
-                    st.rerun()
+                    st.experimental_rerun()  # cortar ejecución y recargar
                 except Exception as e:
                     st.error("No se pudo borrar el caso: " + str(e))
+                    st.stop()
 
-        cur.execute(
-            """
+        # Cargar params del caso
+        cur.execute("""
             SELECT cases.case_name, clients.full_name, units.code, units.project, cases.params_json
             FROM cases
             LEFT JOIN clients ON clients.id = cases.client_id
             LEFT JOIN units ON units.id = cases.unit_id
             WHERE cases.id=?
-            """,
-            (case_id,),
-        )
+        """, (case_id,))
         row = cur.fetchone()
+
         if row and row[4]:
             case_name, client_name, code_u, proj_u, params_json = row
-            params = pd.read_json(params_json, typ="series")
+            # REEMPLAZO de read_json literal → json.loads + pd.Series (evita FutureWarning)
+            params = pd.Series(json.loads(params_json))
+
             df2 = build_schedule(
                 principal=params["principal"],
                 i_m=params["i_m"],
-                n_months=int(params["term_months"] - (params["grace_total"] + params["grace_partial"])) ,
+                n_months=int(params["term_months"] - (params["grace_total"] + params["grace_partial"])),
                 grace_total=int(params["grace_total"]),
                 grace_partial=int(params["grace_partial"]),
                 start_date=datetime.today(),
@@ -773,82 +697,76 @@ with sec4:
                 bono_monto=params["bono"],
             )
 
-            # KPIs SOLO del caso seleccionado
+            # KPIs por caso
             cashflows = df2["Flujo Cliente"].to_numpy()
             irr_m = irr(cashflows)
             tcea = (1 + irr_m) ** 12 - 1 if np.isfinite(irr_m) else np.nan
             symbol = "S/." if (params.get("currency", "PEN") == "PEN") else "$"
 
+            principal_bruto = float(params.get("principal", 0.0))
+            bono = float(params.get("bono", 0.0))
+            principal_neto = max(0.0, principal_bruto - bono)
+            g_total = int(params.get("grace_total", 0))
+            g_parcial = int(params.get("grace_partial", 0))
+            n_total = int(params.get("term_months", 0))
+            n_amort = max(0, n_total - (g_total + g_parcial))
+            i_m = float(params.get("i_m", float("nan")))
+
+            mask_amort = df2["Amortización"] > 0
+            if mask_amort.any():
+                primera = df2.loc[mask_amort].iloc[0]
+                cuota_francesa = float(primera["Cuota"])
+                cuota_inicial_total = float(primera["Cuota Total"])
+                fecha_primera_cuota = str(primera["Fecha"])
+            else:
+                cuota_francesa = 0.0; cuota_inicial_total = 0.0; fecha_primera_cuota = "-"
+
+            df_pos = df2[df2["Periodo"] > 0]
+            interes_total = float(df_pos["Interés"].sum())
+            amort_total   = float(df_pos["Amortización"].sum())
+            seg_total     = float(df_pos["Seguro"].sum())
+            gadm_total    = float(df_pos["Gasto Adm"].sum())
+            costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
+
             with st.expander("📄 Detalle del caso", expanded=True):
                 st.write(f"**Caso**: #{case_id} – {case_name}")
                 st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
 
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("TIR mensual (TIRM)", f"{irr_m*100:.3f}%" if np.isfinite(irr_m) else "No converge")
-            with c2:
-                st.metric("TCEA (anual efectiva)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
-            with c3:
-                total_pagado = float(np.round(-cashflows[1:].sum(), 2))
-                st.metric("Total pagado", f"{symbol} {total_pagado:,.2f}")
+            r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+            with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m*100:.3f}%" if np.isfinite(irr_m) else "No converge")
+            with r1c2: st.metric("TCEA (anual efectiva)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
+            with r1c3: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
+            with r1c4: st.metric("Monto financiado (neto)", f"{symbol} {principal_neto:,.2f}")
+
+            r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+            with r2c1: st.metric("Monto bruto", f"{symbol} {principal_bruto:,.2f}")
+            with r2c2: st.metric("Bono", f"{symbol} {bono:,.2f}")
+            with r2c3: st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
+            with r2c4: st.metric("Plazo amortización (meses)", f"{n_amort}")
+
+            r3c1, r3c2, r3c3, r3c4 = st.columns(4)
+            with r3c1: st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
+            with r3c2: st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
+            with r3c3: st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
+            with r3c4: st.metric("1ra fecha de cuota", fecha_primera_cuota)
+
+            r4c1, r4c2, r4c3, r4c4 = st.columns(4)
+            with r4c1: st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
+            with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
+            with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
+            with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
 
             st.markdown("### 📅 Cronograma del caso seleccionado")
             st.dataframe(
                 df2.style.format({
-                    "Saldo Inicial": "{:,.2f}",
-                    "Interés": "{:,.2f}",
-                    "Amortización": "{:,.2f}",
-                    "Cuota": "{:,.2f}",
-                    "Seguro": "{:,.2f}",
-                    "Gasto Adm": "{:,.2f}",
-                    "Cuota Total": "{:,.2f}",
-                    "Saldo Final": "{:,.2f}",
-                    "Flujo Cliente": "{:,.2f}",
-                }), width='stretch'
+                    "Saldo Inicial": "{:,.2f}", "Interés": "{:,.2f}", "Amortización": "{:,.2f}",
+                    "Cuota": "{:,.2f}", "Seguro": "{:,.2f}", "Gasto Adm": "{:,.2f}",
+                    "Cuota Total": "{:,.2f}", "Saldo Final": "{:,.2f}", "Flujo Cliente": "{:,.2f}",
+                }),
+                width='stretch'
             )
             csv2 = df2.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                "⬇️ Descargar cronograma (CSV)",
-                csv2,
-                file_name=f"cronograma_caso_{case_id}.csv",
-                mime="text/csv",
-            )
+            st.download_button("⬇️ Descargar cronograma (CSV)", csv2,
+                               file_name=f"cronograma_caso_{case_id}.csv", mime="text/csv")
         else:
             st.error("No se pudo leer el caso seleccionado")
-
-with sec4:
-    st.subheader("Base de datos")
-    import tempfile as _tmp
-    db_path = os.environ.get("DB_PATH") or (st.secrets.get("DB_PATH", None) if hasattr(st, "secrets") else None) or os.path.join(_tmp.gettempdir(), "mivivienda.db")
-    st.write("**Archivo**:", db_path)
-    try:
-        size_bytes = os.path.getsize(db_path)
-        st.write(f"**Tamaño**: {size_bytes/1024:.1f} KB")
-        with open(db_path, "rb") as f:
-            st.download_button("⬇️ Descargar base de datos (.db)", f.read(), file_name="mivivienda.db")
-    except Exception:
-        st.info("Aún no existe el archivo de base de datos (se creará al guardar) ✔️")
-
-    dot = r"""
-    digraph G {
-      rankdir=LR; node [shape=record, fontsize=11];
-      users [label="{users| id PK| username UNIQUE| password_hash| created_at }"];
-      clients [label="{clients| id PK| doc_id UNIQUE| full_name| phone| email| income_monthly| dependents| employment_type| notes| created_by| created_at| updated_at }"];
-      units [label="{units| id PK| code UNIQUE| project| created_by| created_at| updated_at }"];
-      cases [label="{cases| id PK| user| client_id FK→clients.id| unit_id FK→units.id| case_name| params_json| created_at }"];
-      cases -> clients [label="client_id"]; cases -> units [label="unit_id"]; users -> cases [style=dotted,label="user (texto)"];
-    }
-    """
-    try:
-        st.graphviz_chart(dot)
-    except Exception:
-        st.code(dot)
-
-st.markdown("""
----
-**Transparencia – referencias técnicas**  
-- Método francés: cuota fija (interés sobre saldo).  
-- Convención **30/360** (meses de 30 días).  
-- **TCEA** ≈ (1+TIRM)^12 - 1.  
-- Gracia total capitaliza interés; gracia parcial paga interés únicamente.  
-""")
