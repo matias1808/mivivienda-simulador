@@ -17,6 +17,9 @@ import streamlit as st
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
 
+# --- Tipo de cambio fijo para normalizar ingresos vs moneda del caso ---
+EXCHANGE_RATE = 3.75  # 1 USD = 3.75 PEN
+
 # ---------------------------------------------------------------------
 # Base de datos (en /tmp para que sea escribible en la nube)
 # ---------------------------------------------------------------------
@@ -90,12 +93,21 @@ def init_db():
         )
     """)
 
+    # Índices y migraciones
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_doc_id ON clients(doc_id)")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_code ON units(code)")
+
+    # Asegurar columna project en units
     cur.execute("PRAGMA table_info(units)")
-    cols = [r[1] for r in cur.fetchall()]
-    if "project" not in cols:
+    ucols = [r[1] for r in cur.fetchall()]
+    if "project" not in ucols:
         cur.execute("ALTER TABLE units ADD COLUMN project TEXT")
+
+    # Asegurar columna income_currency en clients
+    cur.execute("PRAGMA table_info(clients)")
+    ccols = [r[1] for r in cur.fetchall()]
+    if "income_currency" not in ccols:
+        cur.execute("ALTER TABLE clients ADD COLUMN income_currency TEXT DEFAULT 'PEN'")
 
     conn.commit()
     return conn
@@ -232,6 +244,19 @@ def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 100, tol: fl
         r = r_new
     return np.nan
 
+def normalize_income_to_case_currency(income_amount: float, income_cur: str, case_cur: str, tc: float = EXCHANGE_RATE) -> float:
+    income_cur = (income_cur or "PEN").upper()
+    case_cur = (case_cur or "PEN").upper()
+    if income_amount is None:
+        return 0.0
+    if income_cur == case_cur:
+        return float(income_amount)
+    if income_cur == "USD" and case_cur == "PEN":
+        return float(income_amount) * tc
+    if income_cur == "PEN" and case_cur == "USD":
+        return float(income_amount) / tc
+    return float(income_amount)
+
 # ---------------------------------------------------------------------
 # Autenticación (sidebar)
 # ---------------------------------------------------------------------
@@ -300,16 +325,19 @@ with sec1:
     # Estado del formulario
     doc_id = ""; full_name = ""; income_monthly = 0.0; dependents = 0
     phone = ""; email = ""; employment_type = "Dependiente"; notes_client = ""
+    income_currency = "PEN"
     editing_client_id = None
 
     if client_choice != "➕ Nuevo cliente":
         idx = client_labels.index(client_choice) - 1
         c = clients_list[idx]; editing_client_id = c[0]
         cur.execute("""SELECT doc_id, full_name, phone, email, income_monthly, dependents,
-                              employment_type, notes FROM clients WHERE id=?""", (editing_client_id,))
+                              employment_type, notes, income_currency
+                       FROM clients WHERE id=?""", (editing_client_id,))
         row = cur.fetchone()
         if row:
-            doc_id, full_name, phone, email, income_monthly, dependents, employment_type, notes_client = row
+            (doc_id, full_name, phone, email, income_monthly, dependents,
+             employment_type, notes_client, income_currency) = row
 
     colc1, colc2, colc3 = st.columns(3)
     with colc1:
@@ -326,6 +354,9 @@ with sec1:
             ["Dependiente", "Independiente", "Mixto", "Otro"],
             index=["Dependiente","Independiente","Mixto","Otro"].index(employment_type)
                   if employment_type in ["Dependiente","Independiente","Mixto","Otro"] else 0)
+        income_currency = st.selectbox("Moneda del ingreso", ["PEN", "USD"],
+                                       index=0 if income_currency not in ["PEN","USD"]
+                                       else ["PEN","USD"].index(income_currency))
     with colc3:
         notes_client = st.text_area("Notas socioeconómicas", value=notes_client)
         c1, c2 = st.columns(2)
@@ -359,16 +390,17 @@ with sec1:
                 if editing_client_id:
                     cur.execute("""
                         UPDATE clients SET doc_id=?, full_name=?, phone=?, email=?, income_monthly=?, dependents=?,
-                        employment_type=?, notes=?, updated_at=? WHERE id=?""",
+                        employment_type=?, notes=?, income_currency=?, updated_at=? WHERE id=?""",
                         (doc_id, full_name, phone, email, income_monthly, dependents,
-                         employment_type, notes_client, now, editing_client_id))
+                         employment_type, notes_client, income_currency, now, editing_client_id))
                 else:
                     cur.execute("""
                         INSERT INTO clients(doc_id, full_name, phone, email, income_monthly, dependents,
-                        employment_type, notes, created_by, created_at, updated_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        employment_type, notes, income_currency, created_by, created_at, updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (doc_id, full_name, phone, email, income_monthly, dependents,
-                         employment_type, notes_client, st.session_state.auth["user"], now, now))
+                         employment_type, notes_client, income_currency,
+                         st.session_state.auth["user"], now, now))
                 get_conn().commit()
                 st.success("Cliente guardado")
                 st.rerun()
@@ -658,9 +690,13 @@ with sec4:
                     st.error("No se pudo borrar el caso: " + str(e))
                     st.stop()
 
-        # Cargar params del caso
+        # Cargar params del caso + ingreso del cliente y moneda del ingreso
         cur.execute("""
-            SELECT cases.case_name, clients.full_name, units.code, units.project, cases.params_json
+            SELECT cases.case_name,
+                   clients.full_name,
+                   units.code, units.project,
+                   cases.params_json,
+                   clients.income_monthly, clients.income_currency
             FROM cases
             LEFT JOIN clients ON clients.id = cases.client_id
             LEFT JOIN units ON units.id = cases.unit_id
@@ -669,7 +705,7 @@ with sec4:
         row = cur.fetchone()
 
         if row and row[4]:
-            case_name, client_name, code_u, proj_u, params_json = row
+            case_name, client_name, code_u, proj_u, params_json, cli_income, cli_income_cur = row
             params = pd.Series(json.loads(params_json))   # ← sin FutureWarning
 
             df2 = build_schedule(
@@ -699,6 +735,7 @@ with sec4:
             n_total = int(params.get("term_months", 0))
             n_amort = max(0, n_total - (g_total + g_parcial))
             i_m = float(params.get("i_m", float("nan")))
+            case_currency = params.get("currency", "PEN")
 
             mask_amort = df2["Amortización"] > 0
             if mask_amort.any():
@@ -715,6 +752,16 @@ with sec4:
             seg_total     = float(df_pos["Seguro"].sum())
             gadm_total    = float(df_pos["Gasto Adm"].sum())
             costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
+
+            # Normalizar ingreso mensual del cliente a la moneda del caso
+            ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0,
+                                                             cli_income_cur or "PEN",
+                                                             case_currency,
+                                                             EXCHANGE_RATE)
+            if ingreso_norm and ingreso_norm > 0:
+                ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0
+            else:
+                ratio_cuota_ingreso = np.nan
 
             with st.expander("📄 Detalle del caso", expanded=True):
                 st.write(f"**Caso**: #{case_id} – {case_name}")
@@ -743,6 +790,14 @@ with sec4:
             with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
             with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
             with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
+
+            # KPIs de ingreso normalizado y esfuerzo
+            r5c1, r5c2, r5c3, r5c4 = st.columns(4)
+            sym_case = "S/." if case_currency == "PEN" else "$"
+            with r5c1: st.metric(f"Ingreso mensual ({case_currency})", f"{sym_case} {ingreso_norm:,.2f}")
+            with r5c2: st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
+            with r5c3: st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
+            with r5c4: st.write("")
 
             st.markdown("### 📅 Cronograma del caso seleccionado")
             st.dataframe(
