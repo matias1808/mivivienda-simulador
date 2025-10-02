@@ -267,12 +267,32 @@ def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 100, tol: fl
 @st.cache_data(show_spinner=False)
 def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Cronograma") -> bytes:
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    # Intentar con xlsxwriter; si no está, usar openpyxl; si nada, devolver CSV para no romper
+    engine = None
+    try:
+        import xlsxwriter  # noqa: F401
+        engine = "xlsxwriter"
+    except Exception:
+        try:
+            import openpyxl  # noqa: F401
+            engine = "openpyxl"
+        except Exception:
+            engine = None
+    if engine is None:
+        return df.to_csv(index=False).encode("utf-8-sig")
+
+    with pd.ExcelWriter(output, engine=engine) as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
-        # Opcional: formateo simple de ancho de columnas
-        for i, col in enumerate(df.columns):
-            width = max(12, min(30, int(df[col].astype(str).map(len).max() + 2)))
-            writer.sheets[sheet_name].set_column(i, i, width)
+        try:
+            ws = writer.sheets[sheet_name]
+            for i, col in enumerate(df.columns):
+                width = max(12, min(30, int(df[col].astype(str).map(len).max() + 2)))
+                if engine == "xlsxwriter":
+                    ws.set_column(i, i, width)
+                elif engine == "openpyxl":
+                    ws.column_dimensions[ws.cell(row=1, column=i+1).column_letter].width = width
+        except Exception:
+            pass
     return output.getvalue()
 
 # ----------------------------- UI: Autenticación -----------------------------
@@ -286,7 +306,7 @@ with st.sidebar:
         with login_tab:
             u = st.text_input("Usuario")
             p = st.text_input("Contraseña", type="password")
-            if st.button("Entrar", use_container_width=True):
+            if st.button("Entrar", width='stretch'):
                 if check_login(u, p):
                     st.session_state.auth = {"logged": True, "user": u}
                     st.rerun()
@@ -295,7 +315,7 @@ with st.sidebar:
         with signup_tab:
             u2 = st.text_input("Nuevo usuario")
             p2 = st.text_input("Nueva contraseña", type="password")
-            if st.button("Crear cuenta", use_container_width=True):
+            if st.button("Crear cuenta", width='stretch'):
                 if u2 and p2:
                     ok = create_user(u2, p2)
                     if ok:
@@ -307,7 +327,7 @@ with st.sidebar:
                     st.warning("Complete usuario y contraseña")
     else:
         st.write(f"👤 {st.session_state.auth['user']}")
-        if st.button("Cerrar sesión", use_container_width=True):
+        if st.button("Cerrar sesión", width='stretch'):
             st.session_state.clear()
             st.rerun()
 
@@ -577,12 +597,16 @@ with sec3:
                 "Cuota Total": "{:,.2f}",
                 "Saldo Final": "{:,.2f}",
                 "Flujo Cliente": "{:,.2f}",
-            }), use_container_width=True
+            }), width='stretch'
         )
 
-        csv = df.to_csv(index=False).encode("utf-8-sig")
         xlsx_bytes = df_to_xlsx_bytes(df)
-        st.download_button("⬇️ Descargar cronograma XLSX", xlsx_bytes, file_name="cronograma_mivivienda.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button(
+            "⬇️ Descargar cronograma XLSX",
+            xlsx_bytes,
+            file_name="cronograma_mivivienda.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
         st.markdown("---")
         st.subheader("Guardar caso")
@@ -694,13 +718,19 @@ with sec3:
                             "Cuota Total": "{:,.2f}",
                             "Saldo Final": "{:,.2f}",
                             "Flujo Cliente": "{:,.2f}",
-                        }), use_container_width=True
+                        }), width='stretch'
                     )
                     xlsx2 = df_to_xlsx_bytes(df2, sheet_name=f"Caso_{case_id}")
-                    st.download_button("⬇️ Descargar cronograma (XLSX)", xlsx2, file_name=f"cronograma_caso_{case_id}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.download_button(
+                        "⬇️ Descargar cronograma (XLSX)",
+                        xlsx2,
+                        file_name=f"cronograma_caso_{case_id}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
                 else:
                     st.error("No se pudo leer el caso seleccionado")
                 
+
 st.markdown("""
 ---
 **Transparencia – referencias técnicas**  
