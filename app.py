@@ -667,6 +667,24 @@ with sec3:
                         st.write(f"**Caso**: #{case_id} – {case_name}")
                         st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
                         st.json(dict(params))
+
+                    # === Mostrar TABLA del cronograma inmediatamente ===
+                    st.markdown("### 📅 Cronograma del caso cargado")
+                    st.dataframe(
+                        df2.style.format({
+                            "Saldo Inicial": "{:,.2f}",
+                            "Interés": "{:,.2f}",
+                            "Amortización": "{:,.2f}",
+                            "Cuota": "{:,.2f}",
+                            "Seguro": "{:,.2f}",
+                            "Gasto Adm": "{:,.2f}",
+                            "Cuota Total": "{:,.2f}",
+                            "Saldo Final": "{:,.2f}",
+                            "Flujo Cliente": "{:,.2f}",
+                        }), use_container_width=True
+                    )
+                    csv2 = df2.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button("⬇️ Descargar cronograma (caso cargado)", csv2, file_name=f"cronograma_caso_{case_id}.csv", mime="text/csv")
                 else:
                     st.error("No se pudo leer el caso seleccionado")
 
