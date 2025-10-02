@@ -19,6 +19,7 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from io import BytesIO
+import json
 import os
 
 # ----------------------------- Config general -----------------------------
@@ -569,13 +570,153 @@ with sec2:
 
 # ----------------------------- 3) Resultados & Guardado -----------------------------
 with sec3:
-    st.subheader("Resultados")
-    if "schedule_df" not in st.session_state:
-        st.info("Primero configure y genere un cronograma en la pestaña 2.")
+    st.subheader("Resultados & KPIs")
+
+    # ============================ KPIs globales (siempre visibles) ============================
+    cur = get_conn().cursor()
+    cur.execute("SELECT id, params_json FROM cases ORDER BY id DESC")
+    _rows_cases = cur.fetchall()
+
+    total_cases = len(_rows_cases)
+    tot_pen_bruto = tot_usd_bruto = 0.0
+    tot_pen_neto = tot_usd_neto = 0.0
+    i_m_list = []
+    plazo_prom = []
+
+    for _cid, _pjson in _rows_cases:
+        try:
+            s = pd.read_json(_pjson, typ="series")
+            curr = (s.get("currency") or "").upper()
+            principal = float(s.get("principal", 0.0))
+            bono = float(s.get("bono", 0.0))
+            i_m_val = float(s.get("i_m", np.nan))
+            n = int(s.get("term_months", 0))
+            if np.isfinite(i_m_val):
+                i_m_list.append(i_m_val)
+            if n > 0:
+                plazo_prom.append(n)
+            if curr == "PEN":
+                tot_pen_bruto += principal
+                tot_pen_neto += max(0.0, principal - bono)
+            elif curr == "USD":
+                tot_usd_bruto += principal
+                tot_usd_neto += max(0.0, principal - bono)
+        except Exception:
+            pass
+
+    avg_i_m = float(np.mean(i_m_list)) if i_m_list else np.nan
+    avg_tcea = (1 + avg_i_m) ** 12 - 1 if np.isfinite(avg_i_m) else np.nan
+    avg_plazo = int(round(float(np.mean(plazo_prom)))) if plazo_prom else 0
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Casos guardados", f"{total_cases}")
+    with k2:
+        st.metric("Principal bruto PEN", f"S/. {tot_pen_bruto:,.2f}")
+    with k3:
+        st.metric("Principal bruto USD", f"$ {tot_usd_bruto:,.2f}")
+    with k4:
+        st.metric("Plazo medio (meses)", f"{avg_plazo}")
+
+    k5, k6 = st.columns(2)
+    with k5:
+        st.metric("Principal neto PEN", f"S/. {tot_pen_neto:,.2f}")
+    with k6:
+        st.metric("Principal neto USD", f"$ {tot_usd_neto:,.2f}")
+
+    if np.isfinite(avg_tcea):
+        st.caption(f"TCEA media (sobre i_m de casos): {avg_tcea*100:.3f}%")
     else:
+        st.caption("TCEA media (sobre i_m de casos): -")
+
+    st.markdown("---")
+
+    # ============================ Cargar caso previo (siempre visible) ============================
+    st.subheader("Cargar caso previo")
+    cur.execute(
+        """
+        SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project
+        FROM cases
+        LEFT JOIN clients ON clients.id = cases.client_id
+        LEFT JOIN units ON units.id = cases.unit_id
+        ORDER BY cases.id DESC
+        """
+    )
+    rows = cur.fetchall()
+    label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[3] or 'CODE?'} – {r[1]}": r[0] for r in rows}
+    options_cases = ["- Seleccione -"] + list(label_to_caseid.keys()) if rows else ["(No hay casos guardados)"]
+    case_label = st.selectbox("Casos", options=options_cases, key="case_selector_global")
+
+    if st.button("📂 Cargar parámetros del caso", key="btn_load_case_global"):
+        if not rows or case_label in ("- Seleccione -", "(No hay casos guardados)"):
+            st.warning("Seleccione un caso válido")
+        else:
+            case_id = label_to_caseid[case_label]
+            cur.execute(
+                """
+                SELECT cases.case_name, clients.full_name, units.code, units.project, cases.params_json
+                FROM cases
+                LEFT JOIN clients ON clients.id = cases.client_id
+                LEFT JOIN units ON units.id = cases.unit_id
+                WHERE cases.id=?
+                """,
+                (case_id,),
+            )
+            row = cur.fetchone()
+            if row and row[4]:
+                case_name, client_name, code_u, proj_u, params_json = row
+                params = pd.read_json(params_json, typ="series")
+                st.session_state["schedule_cfg"] = dict(params)
+                df2 = build_schedule(
+                    principal=params["principal"],
+                    i_m=params["i_m"],
+                    n_months=int(params["term_months"] - (params["grace_total"] + params["grace_partial"])) ,
+                    grace_total=int(params["grace_total"]),
+                    grace_partial=int(params["grace_partial"]),
+                    start_date=datetime.today(),
+                    fee_opening=params["fee_opening"],
+                    monthly_insurance=params["monthly_insurance"],
+                    monthly_admin_fee=params["monthly_admin_fee"],
+                    bono_monto=params["bono"],
+                )
+                st.session_state["schedule_df"] = df2
+                st.success(f"Caso #{case_id} cargado")
+
+                with st.expander("📄 Detalle del caso cargado", expanded=True):
+                    st.write(f"**Caso**: #{case_id} – {case_name}")
+                    st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
+
+                st.markdown("### 📅 Cronograma del caso cargado")
+                st.dataframe(
+                    df2.style.format({
+                        "Saldo Inicial": "{:,.2f}",
+                        "Interés": "{:,.2f}",
+                        "Amortización": "{:,.2f}",
+                        "Cuota": "{:,.2f}",
+                        "Seguro": "{:,.2f}",
+                        "Gasto Adm": "{:,.2f}",
+                        "Cuota Total": "{:,.2f}",
+                        "Saldo Final": "{:,.2f}",
+                        "Flujo Cliente": "{:,.2f}",
+                    }), width='stretch'
+                )
+                csv2 = df2.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "⬇️ Descargar cronograma (CSV)",
+                    csv2,
+                    file_name=f"cronograma_caso_{case_id}.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.error("No se pudo leer el caso seleccionado")
+
+    st.markdown("---")
+
+    # ============================ Métricas y cronograma del cálculo actual (si disponible) ============================
+    if "schedule_df" in st.session_state:
         df = st.session_state["schedule_df"].copy()
-        cfg = st.session_state["schedule_cfg"]
-        symbol = "S/." if cfg["currency"] == "PEN" else "$"
+        cfg = st.session_state.get("schedule_cfg", {})
+        symbol = "S/." if cfg.get("currency") == "PEN" else "$"
 
         cashflows = df["Flujo Cliente"].to_numpy()
         irr_m = irr(cashflows)
@@ -587,7 +728,7 @@ with sec3:
         with c2:
             st.metric("TCEA (anual efectiva)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
         with c3:
-            total_pagado = -cashflows[1:].sum()
+            total_pagado = float(np.round(-cashflows[1:].sum(), 2))
             st.metric("Total pagado", f"{symbol} {total_pagado:,.2f}")
 
         colnpv1, colnpv2 = st.columns(2)
@@ -597,7 +738,7 @@ with sec3:
                     "Tasa de descuento anual para VAN (%)",
                     min_value=0.0,
                     step=0.1,
-                    value=cfg["tasa_anual"] * 100,
+                    value=float(cfg.get("tasa_anual", 0.0)) * 100,
                 )
                 / 100.0
             )
@@ -607,7 +748,7 @@ with sec3:
         van = npv(disc_m, cashflows)
         st.metric("VAN", f"{symbol} {van:,.2f}")
 
-        st.markdown("### Cronograma de pagos")
+        st.markdown("### Cronograma de pagos (cálculo actual)")
         st.dataframe(
             df.style.format({
                 "Saldo Inicial": "{:,.2f}",
@@ -624,173 +765,12 @@ with sec3:
 
         csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
-            "⬇️ Descargar cronograma CSV",
+            "⬇️ Descargar cronograma CSV (actual)",
             csv_bytes,
             file_name="cronograma_mivivienda.csv",
             mime="text/csv",
         )
 
-        st.markdown("---")
-        st.subheader("Guardar caso")
-        cur = get_conn().cursor()
-        cur.execute("SELECT id, full_name FROM clients ORDER BY full_name ASC")
-        clients_for_save = cur.fetchall()
-        cur.execute("SELECT id, code FROM units ORDER BY code ASC")
-        units_for_save = cur.fetchall()
-
-        sel_client_label_to_id = {f"{c[1]} (ID {c[0]})": c[0] for c in clients_for_save}
-        sel_unit_label_to_id = {f"{u[1]} (ID {u[0]})": u[0] for u in units_for_save}
-
-        client_label = st.selectbox("Cliente", options=["- Seleccione -"] + list(sel_client_label_to_id.keys()))
-        unit_label = st.selectbox("Unidad (Código)", options=["- Seleccione -"] + list(sel_unit_label_to_id.keys()))
-        case_name = st.text_input("Nombre del caso", value="")
-
-        if st.button("💾 Guardar caso en base de datos"):
-            if client_label == "- Seleccione -" or unit_label == "- Seleccione -" or not case_name:
-                st.error("Seleccione cliente, unidad y defina un nombre para el caso")
-            else:
-                client_id = sel_client_label_to_id[client_label]
-                unit_id = sel_unit_label_to_id[unit_label]
-                params = {**cfg, "generated_at": datetime.utcnow().isoformat()}
-                cur.execute(
-                    "INSERT INTO cases (user, client_id, unit_id, case_name, params_json, created_at) VALUES (?,?,?,?,?,?)",
-                    (
-                        st.session_state.auth['user'],
-                        client_id,
-                        unit_id,
-                        case_name,
-                        pd.Series(params).to_json(),
-                        datetime.utcnow().isoformat(),
-                    ),
-                )
-                get_conn().commit()
-                st.success("Caso guardado")
-
-                cur.execute(
-                    """
-                    SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project
-                    FROM cases
-                    LEFT JOIN clients ON clients.id = cases.client_id
-                    LEFT JOIN units ON units.id = cases.unit_id
-                    ORDER BY cases.id DESC LIMIT 1
-                    """
-                )
-                new_row = cur.fetchone()
-                if new_row:
-                    nid, nname, nclient, ncode, nproj = new_row
-                    with st.expander("📄 Caso recién guardado", expanded=True):
-                        st.write(f"**Caso**: #{nid} – {nname}")
-                        st.write(f"**Cliente**: {nclient or '-'}  |  **Unidad**: {ncode or '-'} – {nproj or '-'}")
-
-        st.markdown("---")
-        st.subheader("Cargar caso previo")
-        cur.execute(
-            """
-            SELECT cases.id, cases.case_name, clients.full_name, units.code, units.project, cases.params_json
-            FROM cases
-            LEFT JOIN clients ON clients.id = cases.client_id
-            LEFT JOIN units ON units.id = cases.unit_id
-            ORDER BY cases.id DESC
-            """
-        )
-        rows = cur.fetchall()
-        label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[3] or 'CODE?'} – {r[1]}": r[0] for r in rows}
-        options_cases = ["- Seleccione -"] + list(label_to_caseid.keys()) if rows else ["(No hay casos guardados)"]
-        case_label = st.selectbox("Casos", options=options_cases)
-
-        if st.button("📂 Cargar parámetros del caso"):
-            if not rows or case_label in ("- Seleccione -", "(No hay casos guardados)"):
-                st.warning("Seleccione un caso válido")
-            else:
-                case_id = label_to_caseid[case_label]
-                cur.execute(
-                    """
-                    SELECT cases.case_name, clients.full_name, units.code, units.project, cases.params_json
-                    FROM cases
-                    LEFT JOIN clients ON clients.id = cases.client_id
-                    LEFT JOIN units ON units.id = cases.unit_id
-                    WHERE cases.id=?
-                    """,
-                    (case_id,),
-                )
-                row = cur.fetchone()
-                if row and row[4]:
-                    case_name, client_name, code_u, proj_u, params_json = row
-                    params = pd.read_json(params_json, typ='series')
-                    st.session_state["schedule_cfg"] = dict(params)
-                    df2 = build_schedule(
-                        principal=params["principal"],
-                        i_m=params["i_m"],
-                        n_months=int(params["term_months"] - (params["grace_total"] + params["grace_partial"])) ,
-                        grace_total=int(params["grace_total"]),
-                        grace_partial=int(params["grace_partial"]),
-                        start_date=datetime.today(),
-                        fee_opening=params["fee_opening"],
-                        monthly_insurance=params["monthly_insurance"],
-                        monthly_admin_fee=params["monthly_admin_fee"],
-                        bono_monto=params["bono"],
-                    )
-                    st.session_state["schedule_df"] = df2
-                    st.success(f"Caso #{case_id} cargado")
-
-                    # Detalle (sin JSON)
-                    with st.expander("📄 Detalle del caso cargado", expanded=True):
-                        st.write(f"**Caso**: #{case_id} – {case_name}")
-                        st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
-
-                    # Tabla + descarga CSV
-                    st.markdown("### 📅 Cronograma del caso cargado")
-                    st.dataframe(
-                        df2.style.format({
-                            "Saldo Inicial": "{:,.2f}",
-                            "Interés": "{:,.2f}",
-                            "Amortización": "{:,.2f}",
-                            "Cuota": "{:,.2f}",
-                            "Seguro": "{:,.2f}",
-                            "Gasto Adm": "{:,.2f}",
-                            "Cuota Total": "{:,.2f}",
-                            "Saldo Final": "{:,.2f}",
-                            "Flujo Cliente": "{:,.2f}",
-                        }), width='stretch'
-                    )
-                    csv2 = df2.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        "⬇️ Descargar cronograma (CSV)",
-                        csv2,
-                        file_name=f"cronograma_caso_{case_id}.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.error("No se pudo leer el caso seleccionado")
-
-# ----------------------------- 4) Base de datos -----------------------------
-with sec4:
-    st.subheader("Base de datos")
-    import tempfile as _tmp
-    db_path = os.environ.get("DB_PATH") or (st.secrets.get("DB_PATH", None) if hasattr(st, "secrets") else None) or os.path.join(_tmp.gettempdir(), "mivivienda.db")
-    st.write("**Archivo**:", db_path)
-    try:
-        size_bytes = os.path.getsize(db_path)
-        st.write(f"**Tamaño**: {size_bytes/1024:.1f} KB")
-        with open(db_path, "rb") as f:
-            st.download_button("⬇️ Descargar base de datos (.db)", f.read(), file_name="mivivienda.db")
-    except Exception:
-        st.info("Aún no existe el archivo de base de datos (se creará al guardar) ✔️")
-
-    dot = r"""
-    digraph G {
-      rankdir=LR; node [shape=record, fontsize=11];
-      users [label="{users| id PK| username UNIQUE| password_hash| created_at }"];
-      clients [label="{clients| id PK| doc_id UNIQUE| full_name| phone| email| income_monthly| dependents| employment_type| notes| created_by| created_at| updated_at }"];
-      units [label="{units| id PK| code UNIQUE| project| created_by| created_at| updated_at }"];
-      cases [label="{cases| id PK| user| client_id FK→clients.id| unit_id FK→units.id| case_name| params_json| created_at }"];
-      cases -> clients [label="client_id"]; cases -> units [label="unit_id"]; users -> cases [style=dotted,label="user (texto)"];
-    }
-    """
-    try:
-        st.graphviz_chart(dot)
-    except Exception:
-        st.code(dot)
 
 st.markdown("""
 ---
