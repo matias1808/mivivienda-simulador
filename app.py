@@ -17,7 +17,7 @@ import streamlit as st
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
 
-# --- Tipo de cambio fijo para normalizar ingresos vs moneda del caso ---
+# --- Tipo de cambio fijo para normalizar ingresos (PEN↔USD) ---
 EXCHANGE_RATE = 3.75  # 1 USD = 3.75 PEN
 
 # ---------------------------------------------------------------------
@@ -34,10 +34,7 @@ def get_conn():
     if not db_path:
         db_path = os.path.join(tempfile.gettempdir(), "mivivienda.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    try:
-        conn.execute("PRAGMA foreign_keys=ON")
-    except Exception:
-        pass
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 @st.cache_resource(show_spinner=False)
@@ -229,14 +226,14 @@ def build_schedule(
 def npv(rate: float, cashflows: np.ndarray) -> float:
     return float(np.sum(cashflows / (1 + rate) ** np.arange(len(cashflows))))
 
-def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 100, tol: float = 1e-7) -> float:
+def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 120, tol: float = 1e-8) -> float:
     r = guess
     for _ in range(max_iter):
         t = np.arange(len(cashflows))
         denom = (1 + r) ** t
         f = np.sum(cashflows / denom)
         df = -np.sum(t * cashflows / ((1 + r) ** (t + 1)))
-        if abs(df) < 1e-12:
+        if abs(df) < 1e-14:
             break
         r_new = r - f / df
         if abs(r_new - r) < tol:
@@ -301,7 +298,7 @@ if not st.session_state.auth.get("logged"):
 # UI principal
 # ---------------------------------------------------------------------
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
-st.caption("Empresa inmobiliaria – cálculo de cronograma, VAN/TIR/TCEA y gestión de clientes & unidades")
+st.caption("Empresa inmobiliaria – cálculo de cronograma, VAN/TIR/TCEA/TREA y gestión de clientes & unidades")
 
 sec1, sec2, sec3, sec4 = st.tabs([
     "1) Cliente y Unidad",
@@ -325,8 +322,7 @@ with sec1:
     # Estado del formulario
     doc_id = ""; full_name = ""; income_monthly = 0.0; dependents = 0
     phone = ""; email = ""; employment_type = "Dependiente"; notes_client = ""
-    income_currency = "PEN"
-    editing_client_id = None
+    income_currency = "PEN"; editing_client_id = None
 
     if client_choice != "➕ Nuevo cliente":
         idx = client_labels.index(client_choice) - 1
@@ -409,7 +405,7 @@ with sec1:
             except Exception as e:
                 st.error("No se pudo guardar el cliente: " + str(e))
 
-    # ---------- BORRAR CLIENTE (persistiendo ID en session_state) ----------
+    # ---------- BORRAR CLIENTE (confirmación con session_state) ----------
     if "pending_delete_client_id" not in st.session_state:
         st.session_state.pending_delete_client_id = None
 
@@ -425,17 +421,17 @@ with sec1:
         cur.execute("SELECT COUNT(*) FROM cases WHERE client_id=?", (_cid,))
         cnt = cur.fetchone()[0]
 
-        st.warning(f"¿Eliminar **cliente** ID={_cid} ({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
+        st.warning(f"¿Eliminar cliente ID={_cid} ({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
         if cnt > 0:
-            st.info(f"Este cliente tiene **{cnt}** caso(s) asociado(s).")
+            st.info(f"Este cliente tiene {cnt} caso(s) asociado(s).")
             confirm_chk = st.checkbox("Sí, eliminar también sus casos.", key="del_client_chk")
         else:
             confirm_chk = True
 
-        col_dc1, col_dc2, _ = st.columns(3)
-        with col_dc1:
+        cdc1, cdc2, _ = st.columns(3)
+        with cdc1:
             do_delete = st.button("✅ Confirmar borrado", key="del_client_confirm")
-        with col_dc2:
+        with cdc2:
             cancel_delete = st.button("✖️ Cancelar", key="del_client_cancel")
 
         if cancel_delete:
@@ -449,7 +445,7 @@ with sec1:
                 cur.execute("DELETE FROM clients WHERE id=?", (_cid,))
                 get_conn().commit()
                 st.session_state.pending_delete_client_id = None
-                st.success("Cliente eliminado correctamente.")
+                st.success("Cliente eliminado")
                 st.rerun()
             except Exception as e:
                 st.error("No se pudo borrar el cliente: " + str(e))
@@ -502,7 +498,7 @@ with sec1:
             except Exception as e:
                 st.error("No se pudo guardar la unidad: " + str(e))
 
-    # ---------- BORRAR UNIDAD (persistiendo ID en session_state) ----------
+    # ---------- BORRAR UNIDAD ----------
     if "pending_delete_unit_id" not in st.session_state:
         st.session_state.pending_delete_unit_id = None
 
@@ -518,17 +514,17 @@ with sec1:
         cur.execute("SELECT COUNT(*) FROM cases WHERE unit_id=?", (_uid,))
         cnt = cur.fetchone()[0]
 
-        st.warning(f"¿Eliminar **unidad** ID={_uid} ({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
+        st.warning(f"¿Eliminar unidad ID={_uid} ({(info[0] or '').strip()} – {(info[1] or '').strip()})?")
         if cnt > 0:
-            st.info(f"Esta unidad tiene **{cnt}** caso(s) asociado(s).")
+            st.info(f"Esta unidad tiene {cnt} caso(s) asociado(s).")
             confirm_chk_u = st.checkbox("Sí, eliminar también sus casos.", key="del_unit_chk")
         else:
             confirm_chk_u = True
 
-        col_du1, col_du2, _ = st.columns(3)
-        with col_du1:
+        cdu1, cdu2, _ = st.columns(3)
+        with cdu1:
             do_delete_u = st.button("✅ Confirmar borrado", key="del_unit_confirm")
-        with col_du2:
+        with cdu2:
             cancel_delete_u = st.button("✖️ Cancelar", key="del_unit_cancel")
 
         if cancel_delete_u:
@@ -542,7 +538,7 @@ with sec1:
                 cur.execute("DELETE FROM units WHERE id=?", (_uid,))
                 get_conn().commit()
                 st.session_state.pending_delete_unit_id = None
-                st.success("Unidad eliminada correctamente.")
+                st.success("Unidad eliminada")
                 st.rerun()
             except Exception as e:
                 st.error("No se pudo borrar la unidad: " + str(e))
@@ -655,7 +651,7 @@ with sec3:
                 st.success("Caso guardado correctamente")
 
 # ---------------------------------------------------------------------
-# 4) Casos & KPIs (incluye borrar caso)
+# 4) Casos & KPIs (incluye borrar caso y TREA)
 # ---------------------------------------------------------------------
 with sec4:
     st.subheader("Casos guardados y KPIs del caso seleccionado")
@@ -677,7 +673,7 @@ with sec4:
         case_label = st.selectbox("Casos", options=list(label_to_caseid.keys()), key="kpi_case_selector")
         case_id = label_to_caseid[case_label]
 
-        # Botón de BORRAR CASO (con rerun inmediato)
+        # Botón de BORRAR CASO
         del_col1, del_col2 = st.columns([1, 3])
         with del_col1:
             if st.button("🗑️ Borrar este caso", key="btn_delete_case"):
@@ -706,7 +702,7 @@ with sec4:
 
         if row and row[4]:
             case_name, client_name, code_u, proj_u, params_json, cli_income, cli_income_cur = row
-            params = pd.Series(json.loads(params_json))   # ← sin FutureWarning
+            params = pd.Series(json.loads(params_json))
 
             df2 = build_schedule(
                 principal=params["principal"],
@@ -721,12 +717,12 @@ with sec4:
                 bono_monto=params["bono"],
             )
 
-            # KPIs por caso
+            # ---------------- KPIs (TIRM/TCEA) ----------------
             cashflows = df2["Flujo Cliente"].to_numpy()
             irr_m = irr(cashflows)
             tcea = (1 + irr_m) ** 12 - 1 if np.isfinite(irr_m) else np.nan
-            symbol = "S/." if (params.get("currency", "PEN") == "PEN") else "$"
 
+            symbol = "S/." if (params.get("currency", "PEN") == "PEN") else "$"
             principal_bruto = float(params.get("principal", 0.0))
             bono = float(params.get("bono", 0.0))
             principal_neto = max(0.0, principal_bruto - bono)
@@ -753,25 +749,33 @@ with sec4:
             gadm_total    = float(df_pos["Gasto Adm"].sum())
             costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
 
-            # Normalizar ingreso mensual del cliente a la moneda del caso
+            # --------- Ingreso normalizado y ratio cuota/ingreso ----------
             ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0,
                                                              cli_income_cur or "PEN",
                                                              case_currency,
                                                              EXCHANGE_RATE)
-            if ingreso_norm and ingreso_norm > 0:
-                ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0
-            else:
-                ratio_cuota_ingreso = np.nan
+            ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0 if ingreso_norm > 0 else np.nan
+
+            # -------------------- TREA (ENTIDAD) -------------------------
+            fee_opening = float(params.get("fee_opening", 0.0))
+            cf_ent = []
+            cf_ent.append(-principal_bruto + fee_opening)  # flujo t0 de la entidad
+            for _, r in df_pos.iterrows():
+                cf_ent.append(float(r["Cuota"]) + float(r["Seguro"]) + float(r["Gasto Adm"]))
+            irr_m_ent = irr(np.array(cf_ent))
+            trea = (1 + irr_m_ent) ** 12 - 1 if np.isfinite(irr_m_ent) else np.nan
 
             with st.expander("📄 Detalle del caso", expanded=True):
                 st.write(f"**Caso**: #{case_id} – {case_name}")
                 st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
 
-            r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+            # Fila principal de KPIs (incluye TREA)
+            r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
             with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m*100:.3f}%" if np.isfinite(irr_m) else "No converge")
             with r1c2: st.metric("TCEA (anual efectiva)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
-            with r1c3: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
-            with r1c4: st.metric("Monto financiado (neto)", f"{symbol} {principal_neto:,.2f}")
+            with r1c3: st.metric("TREA (anual efectiva)", f"{trea*100:.3f}%" if np.isfinite(trea) else "-")
+            with r1c4: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
+            with r1c5: st.metric("Monto financiado (neto)", f"{symbol} {principal_neto:,.2f}")
 
             r2c1, r2c2, r2c3, r2c4 = st.columns(4)
             with r2c1: st.metric("Monto bruto", f"{symbol} {principal_bruto:,.2f}")
@@ -791,7 +795,6 @@ with sec4:
             with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
             with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
 
-            # KPIs de ingreso normalizado y esfuerzo
             r5c1, r5c2, r5c3, r5c4 = st.columns(4)
             sym_case = "S/." if case_currency == "PEN" else "$"
             with r5c1: st.metric(f"Ingreso mensual ({case_currency})", f"{sym_case} {ingreso_norm:,.2f}")
