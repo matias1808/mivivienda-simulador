@@ -20,6 +20,21 @@ st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layo
 # --- Tipo de cambio fijo para normalizar ingresos (PEN↔USD) ---
 EXCHANGE_RATE = 3.75  # 1 USD = 3.75 PEN
 
+# --- Entidades financieras (TEA anual) ---
+FINANCIAL_ENTITIES_TEA = {
+    "BBVA": 0.1368,
+    "Banco de Comercio": 0.1250,
+    "Banco Pichincha": 0.1500,
+    "Scotiabank": 0.1240,
+    "Interbank": 0.1260,
+    "Banco GNB": 0.1300,
+    "Caja Metropolitana de Lima": 0.1300,
+    "Caja Tacna": 0.1403,
+    "Caja Trujillo": 0.1340,
+    "Financiera Confianza": 0.1230,
+    "BanBif": 0.1300,
+}
+
 # ---------------------------------------------------------------------
 # Base de datos (en /tmp para que sea escribible en la nube)
 # ---------------------------------------------------------------------
@@ -36,6 +51,7 @@ def get_conn():
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
 
 @st.cache_resource(show_spinner=False)
 def init_db():
@@ -109,6 +125,7 @@ def init_db():
     conn.commit()
     return conn
 
+
 conn = init_db()
 
 # ---------------------------------------------------------------------
@@ -117,21 +134,26 @@ conn = init_db()
 def hash_password(p: str) -> str:
     return hashlib.sha256(p.encode()).hexdigest()
 
+
 def create_user(u: str, p: str) -> bool:
     try:
         cur = get_conn().cursor()
-        cur.execute("INSERT INTO users(username, password_hash, created_at) VALUES(?,?,?)",
-                    (u, hash_password(p), datetime.utcnow().isoformat()))
+        cur.execute(
+            "INSERT INTO users(username, password_hash, created_at) VALUES(?,?,?)",
+            (u, hash_password(p), datetime.utcnow().isoformat()),
+        )
         get_conn().commit()
         return True
     except sqlite3.IntegrityError:
         return False
+
 
 def check_login(u: str, p: str) -> bool:
     cur = get_conn().cursor()
     cur.execute("SELECT password_hash FROM users WHERE username=?", (u,))
     row = cur.fetchone()
     return bool(row and row[0] == hash_password(p))
+
 
 cur = get_conn().cursor()
 cur.execute("SELECT COUNT(*) FROM users")
@@ -148,8 +170,10 @@ def nominal_to_effective_monthly(tna: float, cap_per_year: int) -> float:
     tem = (1.0 + tea) ** (1.0 / 12.0) - 1.0
     return tem
 
+
 def tea_to_monthly(tea: float) -> float:
     return (1.0 + tea) ** (1.0 / 12.0) - 1.0
+
 
 def french_payment(P: float, i_m: float, n: int) -> float:
     if n <= 0:
@@ -157,6 +181,7 @@ def french_payment(P: float, i_m: float, n: int) -> float:
     if i_m == 0:
         return P / n
     return P * (i_m * (1.0 + i_m) ** n) / ((1.0 + i_m) ** n - 1.0)
+
 
 def build_schedule(
     principal: float,
@@ -171,38 +196,47 @@ def build_schedule(
     bono_monto: float = 0.0,
 ) -> pd.DataFrame:
 
-    principal_neto = max(0.0, principal - bono_monto)
+    principal_neto = max(0.0, float(principal) - float(bono_monto))
     if start_date is None:
         start_date = datetime.today()
 
     rows = []
-    flujo_t0 = principal - fee_opening
-    rows.append({
-        "Periodo": 0, "Fecha": start_date.strftime("%Y-%m-%d"),
-        "Saldo Inicial": 0.0, "Interés": 0.0, "Amortización": 0.0,
-        "Cuota": 0.0, "Seguro": 0.0, "Gasto Adm": 0.0, "Cuota Total": 0.0,
-        "Saldo Final": principal_neto, "Flujo Cliente": flujo_t0
-    })
+    flujo_t0 = float(principal) - float(fee_opening)
+    rows.append(
+        {
+            "Periodo": 0,
+            "Fecha": start_date.strftime("%Y-%m-%d"),
+            "Saldo Inicial": 0.0,
+            "Interés": 0.0,
+            "Amortización": 0.0,
+            "Cuota": 0.0,
+            "Seguro": 0.0,
+            "Gasto Adm": 0.0,
+            "Cuota Total": 0.0,
+            "Saldo Final": principal_neto,
+            "Flujo Cliente": flujo_t0,
+        }
+    )
 
     saldo = principal_neto
     date_i = start_date
-    total_months = grace_total + grace_partial + n_months
-    cuota_fija = french_payment(saldo, i_m, n_months) if n_months > 0 else 0.0
+    total_months = int(grace_total) + int(grace_partial) + int(n_months)
+    cuota_fija = french_payment(saldo, i_m, int(n_months)) if n_months > 0 else 0.0
 
     for t in range(1, total_months + 1):
         date_i = date_i + timedelta(days=30)  # 30/360
         interes = saldo * i_m
 
-        if t <= grace_total:
+        if t <= int(grace_total):
             amort = 0.0
             cuota = 0.0
             saldo_final = saldo + interes
-            pago_cliente = -(monthly_insurance + monthly_admin_fee)
-        elif t <= grace_total + grace_partial:
+            pago_cliente = -(float(monthly_insurance) + float(monthly_admin_fee))
+        elif t <= int(grace_total) + int(grace_partial):
             amort = 0.0
             cuota = interes
             saldo_final = saldo
-            pago_cliente = -(cuota + monthly_insurance + monthly_admin_fee)
+            pago_cliente = -(cuota + float(monthly_insurance) + float(monthly_admin_fee))
         else:
             cuota = cuota_fija
             amort = cuota - interes
@@ -210,21 +244,31 @@ def build_schedule(
                 amort = saldo
                 cuota = interes + amort
             saldo_final = saldo - amort
-            pago_cliente = -(cuota + monthly_insurance + monthly_admin_fee)
+            pago_cliente = -(cuota + float(monthly_insurance) + float(monthly_admin_fee))
 
-        rows.append({
-            "Periodo": t, "Fecha": date_i.strftime("%Y-%m-%d"),
-            "Saldo Inicial": saldo, "Interés": interes, "Amortización": amort,
-            "Cuota": cuota, "Seguro": monthly_insurance, "Gasto Adm": monthly_admin_fee,
-            "Cuota Total": cuota + monthly_insurance + monthly_admin_fee,
-            "Saldo Final": saldo_final, "Flujo Cliente": pago_cliente
-        })
+        rows.append(
+            {
+                "Periodo": t,
+                "Fecha": date_i.strftime("%Y-%m-%d"),
+                "Saldo Inicial": saldo,
+                "Interés": interes,
+                "Amortización": amort,
+                "Cuota": cuota,
+                "Seguro": float(monthly_insurance),
+                "Gasto Adm": float(monthly_admin_fee),
+                "Cuota Total": cuota + float(monthly_insurance) + float(monthly_admin_fee),
+                "Saldo Final": saldo_final,
+                "Flujo Cliente": pago_cliente,
+            }
+        )
         saldo = saldo_final
 
     return pd.DataFrame(rows)
 
+
 def npv(rate: float, cashflows: np.ndarray) -> float:
     return float(np.sum(cashflows / (1 + rate) ** np.arange(len(cashflows))))
+
 
 def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 120, tol: float = 1e-8) -> float:
     r = guess
@@ -241,7 +285,10 @@ def irr(cashflows: np.ndarray, guess: float = 0.01, max_iter: int = 120, tol: fl
         r = r_new
     return np.nan
 
-def normalize_income_to_case_currency(income_amount: float, income_cur: str, case_cur: str, tc: float = EXCHANGE_RATE) -> float:
+
+def normalize_income_to_case_currency(
+    income_amount: float, income_cur: str, case_cur: str, tc: float = EXCHANGE_RATE
+) -> float:
     income_cur = (income_cur or "PEN").upper()
     case_cur = (case_cur or "PEN").upper()
     if income_amount is None:
@@ -253,6 +300,7 @@ def normalize_income_to_case_currency(income_amount: float, income_cur: str, cas
     if income_cur == "PEN" and case_cur == "USD":
         return float(income_amount) / tc
     return float(income_amount)
+
 
 # ---------------------------------------------------------------------
 # Autenticación (sidebar)
@@ -300,12 +348,14 @@ if not st.session_state.auth.get("logged"):
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
 st.caption("Empresa inmobiliaria – cálculo de cronograma, VAN/TIR/TCEA/TREA y gestión de clientes & unidades")
 
-sec1, sec2, sec3, sec4 = st.tabs([
-    "1) Cliente y Unidad",
-    "2) Configurar Préstamo",
-    "3) Vincular & Guardar caso",
-    "4) Casos & KPIs",
-])
+sec1, sec2, sec3, sec4 = st.tabs(
+    [
+        "1) Cliente y Unidad",
+        "2) Configurar Préstamo",
+        "3) Vincular & Guardar caso",
+        "4) Casos & KPIs",
+    ]
+)
 
 # ---------------------------------------------------------------------
 # 1) Cliente y Unidad (CRUD robusto)
@@ -320,39 +370,64 @@ with sec1:
     client_choice = st.selectbox("Editar cliente", client_labels, index=0)
 
     # Estado del formulario
-    doc_id = ""; full_name = ""; income_monthly = 0.0; dependents = 0
-    phone = ""; email = ""; employment_type = "Dependiente"; notes_client = ""
-    income_currency = "PEN"; editing_client_id = None
+    doc_id = ""
+    full_name = ""
+    income_monthly = 0.0
+    dependents = 0
+    phone = ""
+    email = ""
+    employment_type = "Dependiente"
+    notes_client = ""
+    income_currency = "PEN"
+    editing_client_id = None
 
     if client_choice != "➕ Nuevo cliente":
         idx = client_labels.index(client_choice) - 1
-        c = clients_list[idx]; editing_client_id = c[0]
-        cur.execute("""SELECT doc_id, full_name, phone, email, income_monthly, dependents,
+        c = clients_list[idx]
+        editing_client_id = c[0]
+        cur.execute(
+            """SELECT doc_id, full_name, phone, email, income_monthly, dependents,
                               employment_type, notes, income_currency
-                       FROM clients WHERE id=?""", (editing_client_id,))
+                       FROM clients WHERE id=?""",
+            (editing_client_id,),
+        )
         row = cur.fetchone()
         if row:
-            (doc_id, full_name, phone, email, income_monthly, dependents,
-             employment_type, notes_client, income_currency) = row
+            (
+                doc_id,
+                full_name,
+                phone,
+                email,
+                income_monthly,
+                dependents,
+                employment_type,
+                notes_client,
+                income_currency,
+            ) = row
 
     colc1, colc2, colc3 = st.columns(3)
     with colc1:
         doc_id = st.text_input("Documento (OBLIGATORIO)", value=doc_id)
         full_name = st.text_input("Nombre completo (OBLIGATORIO)", value=full_name)
-        income_monthly = st.number_input("Ingreso mensual (OBLIGATORIO)", min_value=0.0, step=100.0,
-                                         value=float(income_monthly))
-        dependents = st.number_input("Dependientes (OBLIGATORIO)", min_value=0, step=1,
-                                     value=int(dependents))
+        income_monthly = st.number_input(
+            "Ingreso mensual (OBLIGATORIO)", min_value=0.0, step=100.0, value=float(income_monthly)
+        )
+        dependents = st.number_input("Dependientes (OBLIGATORIO)", min_value=0, step=1, value=int(dependents))
     with colc2:
         phone = st.text_input("Teléfono 9 dígitos (OBLIGATORIO)", value=phone)
         email = st.text_input("Email (OBLIGATORIO)", value=email)
-        employment_type = st.selectbox("Tipo de empleo (OBLIGATORIO)",
+        employment_type = st.selectbox(
+            "Tipo de empleo (OBLIGATORIO)",
             ["Dependiente", "Independiente", "Mixto", "Otro"],
-            index=["Dependiente","Independiente","Mixto","Otro"].index(employment_type)
-                  if employment_type in ["Dependiente","Independiente","Mixto","Otro"] else 0)
-        income_currency = st.selectbox("Moneda del ingreso", ["PEN", "USD"],
-                                       index=0 if income_currency not in ["PEN","USD"]
-                                       else ["PEN","USD"].index(income_currency))
+            index=["Dependiente", "Independiente", "Mixto", "Otro"].index(employment_type)
+            if employment_type in ["Dependiente", "Independiente", "Mixto", "Otro"]
+            else 0,
+        )
+        income_currency = st.selectbox(
+            "Moneda del ingreso",
+            ["PEN", "USD"],
+            index=0 if income_currency not in ["PEN", "USD"] else ["PEN", "USD"].index(income_currency),
+        )
     with colc3:
         notes_client = st.text_area("Notas socioeconómicas", value=notes_client)
         c1, c2 = st.columns(2)
@@ -369,13 +444,20 @@ with sec1:
 
     if btn_save_client:
         missing = []
-        if not doc_id: missing.append("Documento")
-        if not full_name: missing.append("Nombre completo")
-        if income_monthly <= 0: missing.append("Ingreso mensual > 0")
-        if dependents < 0: missing.append("Dependientes")
-        if not valid_phone_pe(phone): missing.append("Teléfono 9 dígitos")
-        if not valid_email(email): missing.append("Email válido")
-        if not employment_type: missing.append("Tipo de empleo")
+        if not doc_id:
+            missing.append("Documento")
+        if not full_name:
+            missing.append("Nombre completo")
+        if income_monthly <= 0:
+            missing.append("Ingreso mensual > 0")
+        if dependents < 0:
+            missing.append("Dependientes")
+        if not valid_phone_pe(phone):
+            missing.append("Teléfono 9 dígitos")
+        if not valid_email(email):
+            missing.append("Email válido")
+        if not employment_type:
+            missing.append("Tipo de empleo")
 
         if missing:
             st.error("Complete correctamente: " + ", ".join(missing))
@@ -384,19 +466,45 @@ with sec1:
             try:
                 cur = get_conn().cursor()
                 if editing_client_id:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         UPDATE clients SET doc_id=?, full_name=?, phone=?, email=?, income_monthly=?, dependents=?,
                         employment_type=?, notes=?, income_currency=?, updated_at=? WHERE id=?""",
-                        (doc_id, full_name, phone, email, income_monthly, dependents,
-                         employment_type, notes_client, income_currency, now, editing_client_id))
+                        (
+                            doc_id,
+                            full_name,
+                            phone,
+                            email,
+                            income_monthly,
+                            dependents,
+                            employment_type,
+                            notes_client,
+                            income_currency,
+                            now,
+                            editing_client_id,
+                        ),
+                    )
                 else:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO clients(doc_id, full_name, phone, email, income_monthly, dependents,
                         employment_type, notes, income_currency, created_by, created_at, updated_at)
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (doc_id, full_name, phone, email, income_monthly, dependents,
-                         employment_type, notes_client, income_currency,
-                         st.session_state.auth["user"], now, now))
+                        (
+                            doc_id,
+                            full_name,
+                            phone,
+                            email,
+                            income_monthly,
+                            dependents,
+                            employment_type,
+                            notes_client,
+                            income_currency,
+                            st.session_state.auth["user"],
+                            now,
+                            now,
+                        ),
+                    )
                 get_conn().commit()
                 st.success("Cliente guardado")
                 st.rerun()
@@ -459,11 +567,15 @@ with sec1:
     unit_labels = ["➕ Nueva unidad"] + [f"{u[1]} – {u[2] or ''} (ID {u[0]})" for u in units_list]
     unit_choice = st.selectbox("Editar unidad (Código y Nombre)", unit_labels, index=0)
 
-    code = ""; project = ""; editing_unit_id = None
+    code = ""
+    project = ""
+    editing_unit_id = None
     if unit_choice != "➕ Nueva unidad":
         idx = unit_labels.index(unit_choice) - 1
-        u = units_list[idx]; editing_unit_id = u[0]
-        code = u[1] or ""; project = u[2] or ""
+        u = units_list[idx]
+        editing_unit_id = u[0]
+        code = u[1] or ""
+        project = u[2] or ""
 
     colu1, colu2 = st.columns(2)
     with colu1:
@@ -484,12 +596,12 @@ with sec1:
             try:
                 cur = get_conn().cursor()
                 if editing_unit_id:
-                    cur.execute("UPDATE units SET code=?, project=?, updated_at=? WHERE id=?",
-                                (code, project, now, editing_unit_id))
+                    cur.execute("UPDATE units SET code=?, project=?, updated_at=? WHERE id=?", (code, project, now, editing_unit_id))
                 else:
-                    cur.execute("INSERT INTO units(code, project, created_by, created_at, updated_at) "
-                                "VALUES(?,?,?,?,?)",
-                                (code, project, st.session_state.auth["user"], now, now))
+                    cur.execute(
+                        "INSERT INTO units(code, project, created_by, created_at, updated_at) VALUES(?,?,?,?,?)",
+                        (code, project, st.session_state.auth["user"], now, now),
+                    )
                 get_conn().commit()
                 st.success("Unidad guardada")
                 st.rerun()
@@ -544,36 +656,50 @@ with sec1:
                 st.error("No se pudo borrar la unidad: " + str(e))
 
 # ---------------------------------------------------------------------
-# 2) Configurar Préstamo
+# 2) Configurar Préstamo (ENTIDADES + CUOTA INICIAL + DESGRAVAMEN + ADM)
 # ---------------------------------------------------------------------
 with sec2:
-    st.subheader("Configuración del préstamo")
+    st.subheader("Configuración del préstamo (con cuota inicial y entidad financiera)")
 
     col1, col2, col3 = st.columns(3)
+
     with col1:
         currency = st.selectbox("Moneda", ["PEN", "USD"], index=0)
-        principal = st.number_input("Monto a financiar (principal bruto)", min_value=0.0, step=1000.0)
+
+        valor_inmueble = st.number_input("Valor del inmueble", min_value=0.0, step=1000.0)
+        cuota_inicial = st.number_input("Cuota inicial", min_value=0.0, step=1000.0)
         bono = st.number_input("Bono (Techo Propio u otro)", min_value=0.0, step=500.0)
+
         term_months = st.number_input("Plazo (meses)", min_value=1, step=1)
+
+        monto_prestamo = max(0.0, valor_inmueble - cuota_inicial - bono)
+        sym_case = "S/." if currency == "PEN" else "$"
+        st.metric("Monto a financiar (PRÉSTAMO)", f"{sym_case} {monto_prestamo:,.2f}")
+
     with col2:
-        tasa_tipo = st.selectbox("Tipo de tasa", ["Efectiva (TEA)", "Nominal (TNA)"])
-        tasa_anual = st.number_input("Tasa anual (%)", min_value=0.0, step=0.1) / 100.0
-        cap_m = 12
-        if tasa_tipo == "Nominal (TNA)":
-            cap_m = st.number_input("Capitalización por año (m)", min_value=1, step=1, value=12)
+        entidad = st.selectbox("Entidad financiera", list(FINANCIAL_ENTITIES_TEA.keys()), index=0)
+        tasa_tipo = "Efectiva (TEA)"
+        tasa_anual = float(FINANCIAL_ENTITIES_TEA[entidad])  # decimal
+        st.number_input("TEA anual (%)", value=float(tasa_anual * 100.0), disabled=True, format="%.2f")
+
         grace_total = st.number_input("Gracia total (meses)", min_value=0, step=1)
+
+        # (se mantiene para compatibilidad en cfg)
+        cap_m = 12
+
     with col3:
         grace_partial = st.number_input("Gracia parcial (meses)", min_value=0, step=1)
         fee_opening = st.number_input("Comisión de apertura (t0)", min_value=0.0, step=100.0)
-        monthly_insurance = st.number_input("Seguro mensual", min_value=0.0, step=10.0)
-        monthly_admin_fee = st.number_input("Gasto admin mensual", min_value=0.0, step=10.0)
 
-    if tasa_tipo == "Efectiva (TEA)":
-        i_m = tea_to_monthly(tasa_anual)
-    else:
-        i_m = nominal_to_effective_monthly(tasa_anual, cap_m)
+        seguro_desgravamen = st.number_input("Seguro de desgravamen (mensual)", min_value=0.0, step=10.0)
+        gasto_administrativo = st.number_input("Gasto administrativo (mensual)", min_value=0.0, step=10.0)
 
-    st.caption(f"Tasa efectiva mensual (TEM): {i_m*100:.5f}% | Convención 30/360 | Pagos vencidos")
+    i_m = tea_to_monthly(tasa_anual)
+
+    st.caption(
+        f"Entidad: {entidad} | TEA: {tasa_anual*100:.2f}% | "
+        f"TEM: {i_m*100:.5f}% | Convención 30/360 | Pagos vencidos"
+    )
 
     if grace_partial > grace_total:
         st.error("La gracia parcial no puede ser mayor que la gracia total.")
@@ -581,31 +707,68 @@ with sec2:
         st.warning("La suma de gracia total y parcial no puede ser ≥ al plazo total.")
 
     if st.button("📅 Generar cronograma"):
+        # Validaciones fuertes
+        if valor_inmueble <= 0:
+            st.error("Ingrese un Valor del inmueble > 0.")
+            st.stop()
+        if cuota_inicial + bono > valor_inmueble:
+            st.error("Cuota inicial + Bono no puede ser mayor que el Valor del inmueble.")
+            st.stop()
+        if monto_prestamo <= 0:
+            st.error("El monto a financiar queda en 0. Ajusta cuota inicial/bono o valor del inmueble.")
+            st.stop()
+
+        if seguro_desgravamen < 0 or gasto_administrativo < 0:
+            st.error("Seguro de desgravamen y gasto administrativo no pueden ser negativos.")
+            st.stop()
+
+        # sanity check (alertas, no bloquean)
+        if seguro_desgravamen > monto_prestamo * 0.05:
+            st.warning("El seguro de desgravamen parece muy alto vs el préstamo (revisa unidades).")
+        if gasto_administrativo > monto_prestamo * 0.05:
+            st.warning("El gasto administrativo parece muy alto vs el préstamo (revisa unidades).")
+
         if grace_partial > grace_total:
             st.error("Corrija los meses de gracia: parcial > total.")
         elif grace_total + grace_partial >= term_months:
             st.error("Ajuste los meses de gracia vs plazo total.")
         else:
             df = build_schedule(
-                principal=principal,
+                principal=monto_prestamo,              # ✅ préstamo neto (restante)
                 i_m=i_m,
                 n_months=int(term_months - (grace_total + grace_partial)),
                 grace_total=int(grace_total),
                 grace_partial=int(grace_partial),
                 start_date=datetime.today(),
                 fee_opening=fee_opening,
-                monthly_insurance=monthly_insurance,
-                monthly_admin_fee=monthly_admin_fee,
-                bono_monto=bono,
+                monthly_insurance=seguro_desgravamen,  # ✅ desgravamen
+                monthly_admin_fee=gasto_administrativo,# ✅ gasto adm
+                bono_monto=0.0,                        # ✅ ya se descontó arriba
             )
+
             st.session_state["schedule_df"] = df
             st.session_state["schedule_cfg"] = {
-                "currency": currency, "principal": principal, "bono": bono,
-                "term_months": term_months, "tasa_tipo": tasa_tipo,
-                "tasa_anual": tasa_anual, "cap_m": cap_m,
-                "grace_total": grace_total, "grace_partial": grace_partial,
-                "fee_opening": fee_opening, "monthly_insurance": monthly_insurance,
-                "monthly_admin_fee": monthly_admin_fee, "i_m": i_m,
+                "currency": currency,
+                "entidad": entidad,
+                "tasa_tipo": tasa_tipo,
+                "tasa_anual": tasa_anual,
+                "cap_m": cap_m,
+                "i_m": i_m,
+
+                "valor_inmueble": valor_inmueble,
+                "cuota_inicial": cuota_inicial,
+                "bono": bono,
+
+                "principal": monto_prestamo,  # lo que se presta
+                "term_months": term_months,
+
+                "grace_total": grace_total,
+                "grace_partial": grace_partial,
+                "fee_opening": fee_opening,
+                "monthly_insurance": seguro_desgravamen,
+                "monthly_admin_fee": gasto_administrativo,
+
+                "principal_mode": "NET",  # bandera para KPIs (evita restar bono 2 veces)
             }
             st.success("Cronograma generado. Ahora vincúlalo y guarda en la pestaña 3)")
 
@@ -643,8 +806,12 @@ with sec3:
                     "INSERT INTO cases(user, client_id, unit_id, case_name, params_json, created_at) "
                     "VALUES(?,?,?,?,?,?)",
                     (
-                        st.session_state.auth["user"], client_id, unit_id,
-                        case_name, pd.Series(params).to_json(), datetime.utcnow().isoformat()
+                        st.session_state.auth["user"],
+                        client_id,
+                        unit_id,
+                        case_name,
+                        pd.Series(params).to_json(),
+                        datetime.utcnow().isoformat(),
                     ),
                 )
                 get_conn().commit()
@@ -704,17 +871,21 @@ with sec4:
             case_name, client_name, code_u, proj_u, params_json, cli_income, cli_income_cur = row
             params = pd.Series(json.loads(params_json))
 
+            # compatibilidad: casos nuevos NET vs casos antiguos LEGACY
+            principal_mode = str(params.get("principal_mode", "LEGACY"))
+            bono_for_schedule = 0.0 if principal_mode == "NET" else float(params.get("bono", 0.0))
+
             df2 = build_schedule(
-                principal=params["principal"],
-                i_m=params["i_m"],
-                n_months=int(params["term_months"] - (params["grace_total"] + params["grace_partial"])),
-                grace_total=int(params["grace_total"]),
-                grace_partial=int(params["grace_partial"]),
+                principal=float(params.get("principal", 0.0)),
+                i_m=float(params.get("i_m", 0.0)),
+                n_months=int(float(params.get("term_months", 0)) - (float(params.get("grace_total", 0)) + float(params.get("grace_partial", 0)))),
+                grace_total=int(float(params.get("grace_total", 0))),
+                grace_partial=int(float(params.get("grace_partial", 0))),
                 start_date=datetime.today(),
-                fee_opening=params["fee_opening"],
-                monthly_insurance=params["monthly_insurance"],
-                monthly_admin_fee=params["monthly_admin_fee"],
-                bono_monto=params["bono"],
+                fee_opening=float(params.get("fee_opening", 0.0)),
+                monthly_insurance=float(params.get("monthly_insurance", 0.0)),
+                monthly_admin_fee=float(params.get("monthly_admin_fee", 0.0)),
+                bono_monto=bono_for_schedule,
             )
 
             # ---------------- KPIs (TIRM/TCEA) ----------------
@@ -722,16 +893,18 @@ with sec4:
             irr_m = irr(cashflows)
             tcea = (1 + irr_m) ** 12 - 1 if np.isfinite(irr_m) else np.nan
 
-            symbol = "S/." if (params.get("currency", "PEN") == "PEN") else "$"
+            case_currency = str(params.get("currency", "PEN"))
+            symbol = "S/." if (case_currency == "PEN") else "$"
+
             principal_bruto = float(params.get("principal", 0.0))
             bono = float(params.get("bono", 0.0))
-            principal_neto = max(0.0, principal_bruto - bono)
-            g_total = int(params.get("grace_total", 0))
-            g_parcial = int(params.get("grace_partial", 0))
-            n_total = int(params.get("term_months", 0))
+            principal_neto = principal_bruto if principal_mode == "NET" else max(0.0, principal_bruto - bono)
+
+            g_total = int(float(params.get("grace_total", 0)))
+            g_parcial = int(float(params.get("grace_partial", 0)))
+            n_total = int(float(params.get("term_months", 0)))
             n_amort = max(0, n_total - (g_total + g_parcial))
             i_m = float(params.get("i_m", float("nan")))
-            case_currency = params.get("currency", "PEN")
 
             mask_amort = df2["Amortización"] > 0
             if mask_amort.any():
@@ -740,7 +913,9 @@ with sec4:
                 cuota_inicial_total = float(primera["Cuota Total"])
                 fecha_primera_cuota = str(primera["Fecha"])
             else:
-                cuota_francesa = 0.0; cuota_inicial_total = 0.0; fecha_primera_cuota = "-"
+                cuota_francesa = 0.0
+                cuota_inicial_total = 0.0
+                fecha_primera_cuota = "-"
 
             df_pos = df2[df2["Periodo"] > 0]
             interes_total = float(df_pos["Interés"].sum())
@@ -750,69 +925,112 @@ with sec4:
             costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
 
             # --------- Ingreso normalizado y ratio cuota/ingreso ----------
-            ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0,
-                                                             cli_income_cur or "PEN",
-                                                             case_currency,
-                                                             EXCHANGE_RATE)
+            ingreso_norm = normalize_income_to_case_currency(
+                cli_income or 0.0,
+                cli_income_cur or "PEN",
+                case_currency,
+                EXCHANGE_RATE,
+            )
             ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0 if ingreso_norm > 0 else np.nan
 
             # -------------------- TREA (ENTIDAD) -------------------------
             fee_opening = float(params.get("fee_opening", 0.0))
             cf_ent = []
-            cf_ent.append(-principal_bruto + fee_opening)  # flujo t0 de la entidad
+            cf_ent.append(-principal_bruto + fee_opening)  # t0 entidad (sale préstamo, entra fee)
             for _, r in df_pos.iterrows():
                 cf_ent.append(float(r["Cuota"]) + float(r["Seguro"]) + float(r["Gasto Adm"]))
             irr_m_ent = irr(np.array(cf_ent))
             trea = (1 + irr_m_ent) ** 12 - 1 if np.isfinite(irr_m_ent) else np.nan
 
+            entidad = str(params.get("entidad", "-"))
+            tea_case = float(params.get("tasa_anual", np.nan))
+            valor_inmueble = float(params.get("valor_inmueble", np.nan))
+            cuota_ini = float(params.get("cuota_inicial", np.nan))
+
             with st.expander("📄 Detalle del caso", expanded=True):
                 st.write(f"**Caso**: #{case_id} – {case_name}")
                 st.write(f"**Cliente**: {client_name or '-'}  |  **Unidad**: {code_u or '-'} – {proj_u or '-'}")
+                st.write(f"**Entidad**: {entidad} | **TEA**: {tea_case*100:.2f}%" if np.isfinite(tea_case) else f"**Entidad**: {entidad}")
+                if np.isfinite(valor_inmueble) and np.isfinite(cuota_ini):
+                    st.write(f"**Valor inmueble**: {symbol} {valor_inmueble:,.2f} | **Cuota inicial**: {symbol} {cuota_ini:,.2f} | **Bono**: {symbol} {bono:,.2f}")
 
             # Fila principal de KPIs (incluye TREA)
             r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
-            with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m*100:.3f}%" if np.isfinite(irr_m) else "No converge")
-            with r1c2: st.metric("TCEA (anual efectiva)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
-            with r1c3: st.metric("TREA (anual efectiva)", f"{trea*100:.3f}%" if np.isfinite(trea) else "-")
-            with r1c4: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
-            with r1c5: st.metric("Monto financiado (neto)", f"{symbol} {principal_neto:,.2f}")
+            with r1c1:
+                st.metric("TIR mensual (TIRM)", f"{irr_m*100:.3f}%" if np.isfinite(irr_m) else "No converge")
+            with r1c2:
+                st.metric("TCEA (anual efectiva)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
+            with r1c3:
+                st.metric("TREA (anual efectiva)", f"{trea*100:.3f}%" if np.isfinite(trea) else "-")
+            with r1c4:
+                st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
+            with r1c5:
+                st.metric("Monto financiado (neto)", f"{symbol} {principal_neto:,.2f}")
 
             r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-            with r2c1: st.metric("Monto bruto", f"{symbol} {principal_bruto:,.2f}")
-            with r2c2: st.metric("Bono", f"{symbol} {bono:,.2f}")
-            with r2c3: st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
-            with r2c4: st.metric("Plazo amortización (meses)", f"{n_amort}")
+            with r2c1:
+                st.metric("Monto préstamo (principal)", f"{symbol} {principal_bruto:,.2f}")
+            with r2c2:
+                st.metric("Bono", f"{symbol} {bono:,.2f}")
+            with r2c3:
+                st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
+            with r2c4:
+                st.metric("Plazo amortización (meses)", f"{n_amort}")
 
             r3c1, r3c2, r3c3, r3c4 = st.columns(4)
-            with r3c1: st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
-            with r3c2: st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
-            with r3c3: st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
-            with r3c4: st.metric("1ra fecha de cuota", fecha_primera_cuota)
+            with r3c1:
+                st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
+            with r3c2:
+                st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
+            with r3c3:
+                st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
+            with r3c4:
+                st.metric("1ra fecha de cuota", fecha_primera_cuota)
 
             r4c1, r4c2, r4c3, r4c4 = st.columns(4)
-            with r4c1: st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
-            with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
-            with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
-            with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
+            with r4c1:
+                st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
+            with r4c2:
+                st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
+            with r4c3:
+                st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
+            with r4c4:
+                st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
 
             r5c1, r5c2, r5c3, r5c4 = st.columns(4)
             sym_case = "S/." if case_currency == "PEN" else "$"
-            with r5c1: st.metric(f"Ingreso mensual ({case_currency})", f"{sym_case} {ingreso_norm:,.2f}")
-            with r5c2: st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
-            with r5c3: st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
-            with r5c4: st.write("")
+            with r5c1:
+                st.metric(f"Ingreso mensual ({case_currency})", f"{sym_case} {ingreso_norm:,.2f}")
+            with r5c2:
+                st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
+            with r5c3:
+                st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
+            with r5c4:
+                st.write("")
 
             st.markdown("### 📅 Cronograma del caso seleccionado")
             st.dataframe(
-                df2.style.format({
-                    "Saldo Inicial": "{:,.2f}", "Interés": "{:,.2f}", "Amortización": "{:,.2f}",
-                    "Cuota": "{:,.2f}", "Seguro": "{:,.2f}", "Gasto Adm": "{:,.2f}",
-                    "Cuota Total": "{:,.2f}", "Saldo Final": "{:,.2f}", "Flujo Cliente": "{:,.2f}",
-                }),
-                width='stretch'
+                df2.style.format(
+                    {
+                        "Saldo Inicial": "{:,.2f}",
+                        "Interés": "{:,.2f}",
+                        "Amortización": "{:,.2f}",
+                        "Cuota": "{:,.2f}",
+                        "Seguro": "{:,.2f}",
+                        "Gasto Adm": "{:,.2f}",
+                        "Cuota Total": "{:,.2f}",
+                        "Saldo Final": "{:,.2f}",
+                        "Flujo Cliente": "{:,.2f}",
+                    }
+                ),
+                use_container_width=True,
             )
             csv2 = df2.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ Descargar cronograma (CSV)", csv2,
-                               file_name=f"cronograma_caso_{case_id}.csv", mime="text/csv")
+            st.download_button(
+                "⬇️ Descargar cronograma (CSV)",
+                csv2,
+                file_name=f"cronograma_caso_{case_id}.csv",
+                mime="text/csv",
+            )
         else:
             st.error("No se pudo leer el caso seleccionado")
