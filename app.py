@@ -387,7 +387,7 @@ if not st.session_state.auth.get("logged"):
 # UI principal
 # ---------------------------------------------------------------------
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
-st.caption("Cálculo de cronograma, TCEA/TREA y gestión de clientes (sin unidad inmobiliaria)")
+st.caption("Cálculo de cronograma, TCEA/TREA y gestión de clientes (sin semáforo y sin unidad inmobiliaria)")
 
 sec1, sec2, sec3, sec4 = st.tabs([
     "Cliente",
@@ -585,7 +585,6 @@ with sec2:
         st.warning("La suma de gracia total y parcial no puede ser ≥ al plazo total.")
 
     if st.button("📅 Generar cronograma"):
-        # Validaciones principales
         if valor_inmueble <= 0:
             st.error("Ingrese un Valor del inmueble > 0.")
             st.stop()
@@ -602,7 +601,6 @@ with sec2:
             st.error("Ajuste los meses de gracia vs plazo total.")
             st.stop()
 
-        # Validaciones “suaves” (alertas) para que no metan cualquier cosa
         if seguro_desgravamen > monto_prestamo * 0.05:
             st.warning("El seguro de desgravamen parece muy alto vs el préstamo (revisa unidades).")
         if gasto_administrativo > monto_prestamo * 0.05:
@@ -618,7 +616,7 @@ with sec2:
             fee_opening=fee_opening,
             monthly_insurance=seguro_desgravamen,
             monthly_admin_fee=gasto_administrativo,
-            bono_monto=0.0,  # ya se resta en monto_prestamo
+            bono_monto=0.0,
         )
 
         st.session_state["schedule_df"] = df
@@ -673,7 +671,7 @@ with sec3:
                     st.error("No se pudo guardar el caso: " + str(e))
 
 # ---------------------------------------------------------------------
-# 4) Casos & KPIs (incluye semáforo Cuota/Ingreso)
+# 4) Casos & KPIs (sin semáforo)
 # ---------------------------------------------------------------------
 with sec4:
     st.subheader("Casos guardados y KPIs del caso seleccionado")
@@ -741,7 +739,7 @@ with sec4:
         bono_monto=bono_for_schedule,
     )
 
-    # ---------------- KPIs base ----------------
+    # ---------------- KPIs ----------------
     case_currency = str(params.get("currency", "PEN"))
     symbol = "S/." if case_currency == "PEN" else "$"
 
@@ -756,7 +754,7 @@ with sec4:
 
     df_pos = df2[df2["Periodo"] > 0]
 
-    # Banco: TREA Crédito (solo Cuota del préstamo)
+    # Banco: TREA Crédito (solo "Cuota" del préstamo)
     cf_bank_credit = [-principal + fee_opening]
     for _, r in df_pos.iterrows():
         cf_bank_credit.append(float(r["Cuota"]))
@@ -770,7 +768,6 @@ with sec4:
     irr_m_bank_total = irr(np.array(cf_bank_total, dtype=float))
     trea_total = (1 + irr_m_bank_total) ** 12 - 1 if np.isfinite(irr_m_bank_total) else np.nan
 
-    # Métricas varias
     g_total = int(float(params.get("grace_total", 0)))
     g_parcial = int(float(params.get("grace_partial", 0)))
     n_total = int(float(params.get("term_months", 0)))
@@ -793,7 +790,6 @@ with sec4:
     gadm_total    = float(df_pos["Gasto Adm"].sum())
     costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
 
-    # Ingreso normalizado y ratio
     ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0, cli_income_cur or "PEN", case_currency, EXCHANGE_RATE)
     ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0 if ingreso_norm > 0 else np.nan
 
@@ -818,7 +814,6 @@ with sec4:
                 f"**Bono**: {symbol} {bono:,.2f}"
             )
 
-    # Fila principal
     r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
     with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m_cli*100:.3f}%" if np.isfinite(irr_m_cli) else "No converge")
     with r1c2: st.metric("TCEA (cliente)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
@@ -846,52 +841,6 @@ with sec4:
     with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
     with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
 
-    # -------------------- Semáforo capacidad de pago (DTI) --------------------
-    st.markdown("### 🚦 Evaluación de capacidad de pago (Cuota/Ingreso)")
-
-    cpi_col1, cpi_col2 = st.columns(2)
-    with cpi_col1:
-        limite_verde = st.slider("Límite APROBABLE (verde) %", 10, 50, 30, 1) / 100.0
-    with cpi_col2:
-        limite_amarillo = st.slider("Límite RIESGOSO (amarillo) %", 15, 70, 40, 1) / 100.0
-
-    if limite_amarillo < limite_verde:
-        limite_amarillo = limite_verde
-
-    if not np.isfinite(ingreso_norm) or ingreso_norm <= 0:
-        st.info("Ingresa un **Ingreso mensual** válido para evaluar la capacidad de pago.")
-    else:
-        dti = cuota_inicial_total / ingreso_norm
-
-        cuota_max_verde = ingreso_norm * limite_verde
-        cuota_max_amarillo = ingreso_norm * limite_amarillo
-
-        st.caption(
-            f"Cuota total actual: {symbol} {cuota_inicial_total:,.2f} | "
-            f"Ingreso: {symbol} {ingreso_norm:,.2f} | "
-            f"Cuota/Ingreso: {dti*100:.2f}%"
-        )
-
-        if dti <= limite_verde:
-            st.success(f"🟢 **APROBABLE**: la cuota está dentro del {limite_verde*100:.0f}% del ingreso.")
-        elif dti <= limite_amarillo:
-            st.warning(f"🟡 **RIESGOSO**: supera {limite_verde*100:.0f}% pero no pasa {limite_amarillo*100:.0f}%.")
-        else:
-            st.error(f"🔴 **NO APROBABLE**: supera {limite_amarillo*100:.0f}% del ingreso.")
-
-        st.write(
-            f"**Cuota máxima sugerida (verde):** {symbol} {cuota_max_verde:,.2f}\n\n"
-            f"**Cuota máxima tolerable (amarillo):** {symbol} {cuota_max_amarillo:,.2f}"
-        )
-
-        exceso = cuota_inicial_total - cuota_max_verde
-        if exceso > 0:
-            st.info(
-                f"Para llegar a verde, deberías bajar la cuota aprox. **{symbol} {exceso:,.2f}** "
-                f"(subiendo cuota inicial, alargando plazo o bajando TEA/cargos)."
-            )
-
-    # -------------------- Tabla --------------------
     st.markdown("### 📅 Cronograma del caso seleccionado")
     st.dataframe(
         df2.style.format({
