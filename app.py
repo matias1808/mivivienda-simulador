@@ -36,6 +36,8 @@ FINANCIAL_ENTITIES_TEA = {
     "BanBif": 0.1300,
 }
 
+DB_VIEW_KEY = "12345"  # demo: clave para ver la BD
+
 # ---------------------------------------------------------------------
 # Base de datos (en /tmp para que sea escribible en la nube)
 # ---------------------------------------------------------------------
@@ -388,6 +390,10 @@ if not st.session_state.auth.get("logged"):
 if "helpbot_ctx" not in st.session_state:
     st.session_state["helpbot_ctx"] = None
 
+# Gate BD
+if "db_unlocked" not in st.session_state:
+    st.session_state["db_unlocked"] = False
+
 # ---------------------------------------------------------------------
 # UI principal
 # ---------------------------------------------------------------------
@@ -609,11 +615,6 @@ with sec2:
             st.error("Ajuste los meses de gracia vs plazo total.")
             ok = False
 
-        if seguro_desgravamen > monto_prestamo * 0.05 and monto_prestamo > 0:
-            st.warning("El seguro de desgravamen parece alto vs préstamo (revisa el dato).")
-        if gasto_administrativo > monto_prestamo * 0.05 and monto_prestamo > 0:
-            st.warning("El gasto administrativo parece alto vs préstamo (revisa el dato).")
-
         if ok:
             df = build_schedule(
                 principal=monto_prestamo,
@@ -792,9 +793,9 @@ with sec4:
                 fecha_primera_cuota = "-"
 
             interes_total = float(df_pos["Interés"].sum())
-            amort_total   = float(df_pos["Amortización"].sum())
-            seg_total     = float(df_pos["Seguro"].sum())
-            gadm_total    = float(df_pos["Gasto Adm"].sum())
+            amort_total = float(df_pos["Amortización"].sum())
+            seg_total = float(df_pos["Seguro"].sum())
+            gadm_total = float(df_pos["Gasto Adm"].sum())
             costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
 
             ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0, cli_income_cur or "PEN", case_currency, EXCHANGE_RATE)
@@ -901,13 +902,29 @@ with sec4:
             )
 
 # ---------------------------------------------------------------------
-# 5) 📦 Base de datos (viewer)
+# 5) 📦 Base de datos (viewer con clave 12345)
 # ---------------------------------------------------------------------
 with sec5:
     st.subheader("📦 Datos guardados en SQLite")
 
-    if st.session_state.auth.get("user") != "admin":
-        st.info("Esta vista está habilitada solo para el usuario **admin**.")
+    # Si ya está desbloqueado, mostramos botón para bloquear
+    topA, topB = st.columns([3, 1])
+    with topA:
+        st.caption("Acceso protegido por clave (demo).")
+    with topB:
+        if st.session_state["db_unlocked"]:
+            if st.button("🔒 Bloquear BD"):
+                st.session_state["db_unlocked"] = False
+                st.rerun()
+
+    if not st.session_state["db_unlocked"]:
+        key = st.text_input("Ingresar clave para ver la base de datos", type="password", key="db_key_input")
+        if key == DB_VIEW_KEY:
+            st.session_state["db_unlocked"] = True
+            st.success("Clave correcta. BD desbloqueada.")
+            st.rerun()
+        else:
+            st.info("Ingrese la clave **12345** para mostrar las tablas.")
     else:
         conn = get_conn()
         try:
@@ -925,7 +942,8 @@ with sec5:
         else:
             colA, colB = st.columns([2, 1])
             with colA:
-                table = st.selectbox("Tabla", tables, index=tables.index("clients") if "clients" in tables else 0)
+                default_idx = tables.index("clients") if "clients" in tables else 0
+                table = st.selectbox("Tabla", tables, index=default_idx)
             with colB:
                 limit = st.number_input("Máx. filas", min_value=10, max_value=5000, value=500, step=50)
 
@@ -943,7 +961,7 @@ with sec5:
                 st.error(f"No se pudo leer la tabla {table}: {e}")
 
 # ---------------------------------------------------------------------
-# 🤖 Helpy flotante (abajo derecha, subido para no tapar Manage app)
+# 🤖 Helpy flotante + globito emergente cada 5s (nudge)
 # ---------------------------------------------------------------------
 ctx = st.session_state.get("helpbot_ctx", None)
 ctx_json = json.dumps(ctx, ensure_ascii=False) if ctx else "null"
@@ -981,6 +999,33 @@ HELPBOT_INJECT_TEMPLATE = r"""
         user-select: none;
       }
       #mv-helpbot-fab:hover { transform: translateY(-1px); }
+
+      /* Nudge (globito) */
+      #mv-helpbot-nudge {
+        position: fixed;
+        right: 84px;  /* a la izquierda del bot */
+        bottom: 98px; /* alineado con el FAB (subido) */
+        z-index: 2147483000;
+        max-width: 260px;
+        background: rgba(20,20,20,.85);
+        border: 1px solid rgba(255,255,255,.12);
+        color: rgba(255,255,255,.92);
+        padding: 10px 12px;
+        border-radius: 14px;
+        box-shadow: 0 12px 35px rgba(0,0,0,.35);
+        backdrop-filter: blur(14px);
+        font-size: 12.5px;
+        line-height: 1.25;
+        opacity: 0;
+        transform: translateY(6px);
+        transition: opacity .22s ease, transform .22s ease;
+        display: none;
+        pointer-events: none;
+      }
+      #mv-helpbot-nudge.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
 
       /* Panel también subido */
       #mv-helpbot-panel {
@@ -1103,6 +1148,7 @@ HELPBOT_INJECT_TEMPLATE = r"""
     root.id = "mv-helpbot-root";
     root.innerHTML = `
       <div id="mv-helpbot-fab" aria-label="Abrir Helpy">🤖</div>
+      <div id="mv-helpbot-nudge"></div>
 
       <div id="mv-helpbot-panel" role="dialog" aria-label="Helpy">
         <div id="mv-helpbot-header">
@@ -1124,6 +1170,7 @@ HELPBOT_INJECT_TEMPLATE = r"""
     const STORAGE_KEY = "mivivienda_helpy_msgs_v1";
 
     const fab = doc.getElementById("mv-helpbot-fab");
+    const nudge = doc.getElementById("mv-helpbot-nudge");
     const panel = doc.getElementById("mv-helpbot-panel");
     const closeBtn = doc.getElementById("mv-helpbot-close");
     const chips = doc.getElementById("mv-helpbot-chips");
@@ -1140,6 +1187,16 @@ HELPBOT_INJECT_TEMPLATE = r"""
       { label: "🗄️ Base de datos", q: "¿Cómo veo la base de datos?" },
     ];
 
+    const NUDGES = [
+      "👋 ¿Necesitas ayuda? Soy Helpy 🤖",
+      "Tip: genera el cronograma y luego guarda el caso 💾",
+      "¿No entiendes TCEA/TREA? Pregúntame y te lo explico fácil 🙂",
+      "¿Quieres exportar? Tienes botón para descargar CSV ⬇️",
+      "🗄️ Para ver BD: pestaña Base de datos y clave 12345",
+    ];
+    let nudgeIdx = 0;
+    let nudgeTimer = null;
+
     function money(sym, x){
       const n = Number(x);
       if (!isFinite(n)) return `${sym} -`;
@@ -1149,6 +1206,42 @@ HELPBOT_INJECT_TEMPLATE = r"""
       const n = Number(x);
       if (!isFinite(n)) return "-";
       return (n*100).toFixed(3) + "%";
+    }
+
+    function showNudge(){
+      // solo si el panel está cerrado
+      if (panel.style.display === "flex") return;
+      const msg = NUDGES[nudgeIdx % NUDGES.length];
+      nudgeIdx++;
+
+      nudge.textContent = msg;
+      nudge.style.display = "block";
+      // reflow
+      void nudge.offsetHeight;
+      nudge.classList.add("show");
+
+      setTimeout(() => {
+        nudge.classList.remove("show");
+      }, 2200);
+
+      setTimeout(() => {
+        if (!nudge.classList.contains("show")) nudge.style.display = "none";
+      }, 2600);
+    }
+
+    function startNudges(){
+      if (nudgeTimer) return;
+      // primer mensaje
+      setTimeout(showNudge, 2000);
+      nudgeTimer = setInterval(showNudge, 5000);
+    }
+
+    function stopNudges(){
+      if (!nudgeTimer) return;
+      clearInterval(nudgeTimer);
+      nudgeTimer = null;
+      nudge.classList.remove("show");
+      nudge.style.display = "none";
     }
 
     function addMsg(role, text){
@@ -1256,16 +1349,7 @@ Tip: usa los botones rápidos arriba.`);
 2) TREA (entidad) = “cuánto gana el banco”.
 Hay dos formas:
 - TREA (crédito): cuenta solo la ‘Cuota’ del préstamo (sin cargos) → ${treaC}
-- TREA (total cobros): si metes también seguro+adm como cobros → ${treaT}
-
-Tu caso:
-Préstamo: ${money(sym, p)}
-Comisión apertura: ${money(sym, fee)}
-Cuota (sin cargos): ${money(sym, cuota)}
-Cuota total (con cargos): ${money(sym, cuotaTot)}
-TCEA: ${tcea}
-TREA(crédito): ${treaC}
-TREA(total cobros): ${treaT}`
+- TREA (total cobros): si metes también seguro+adm como cobros → ${treaT}`
       );
     }
 
@@ -1277,7 +1361,7 @@ TREA(total cobros): ${treaT}`
         return explainTceaTreaWithNumbers();
       }
       if (q.includes("tcea") || q.includes("trea") || q.includes("tir") || q.includes("tirm")) {
-        return "TCEA = costo anual efectivo para el CLIENTE. TREA = rentabilidad anual efectiva para la ENTIDAD. Si quieres, dime: “Explícame por qué TCEA y TREA salen diferentes” y te lo explico con tus números.";
+        return "TCEA = costo anual efectivo para el CLIENTE. TREA = rentabilidad anual efectiva para la ENTIDAD. Si quieres, dime: “Explícame por qué TCEA y TREA salen diferentes”.";
       }
 
       if (q.includes("login") || q.includes("iniciar") || q.includes("sesion") || q.includes("sesión") || q.includes("contraseña") || q.includes("usuario")) {
@@ -1305,7 +1389,7 @@ TREA(total cobros): ${treaT}`
       }
 
       if (q.includes("base de datos") || q.includes("bd") || q.includes("sqlite") || q.includes("tabla")) {
-        return "Base de datos: pestaña '📦 Base de datos' (solo admin) para ver tablas y descargar CSV. Ojo: si usas /tmp en Streamlit Cloud, la BD puede reiniciarse.";
+        return "Base de datos: pestaña '📦 Base de datos'. Ingresa la clave **12345** para ver tablas y descargar CSV. Ojo: si usas /tmp en Streamlit Cloud, la BD puede reiniciarse.";
       }
 
       if (q.includes("moneda") || q.includes("usd") || q.includes("pen") || q.includes("tipo de cambio") || q.includes("tc")) {
@@ -1322,17 +1406,26 @@ TREA(total cobros): ${treaT}`
       addMsg("bot", respond(q));
     }
 
+    // Nudges empiezan siempre
+    startNudges();
+
     fab.addEventListener("click", () => {
       const isOpen = panel.style.display === "flex";
       panel.style.display = isOpen ? "none" : "flex";
       if (!isOpen){
+        stopNudges(); // mientras está abierto, no molestamos
         renderChips();
         load();
         setTimeout(() => input.focus(), 50);
+      } else {
+        startNudges();
       }
     });
 
-    closeBtn.addEventListener("click", () => { panel.style.display = "none"; });
+    closeBtn.addEventListener("click", () => {
+      panel.style.display = "none";
+      startNudges();
+    });
 
     send.addEventListener("click", sendMsg);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMsg(); });
