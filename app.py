@@ -36,7 +36,8 @@ FINANCIAL_ENTITIES_TEA = {
     "BanBif": 0.1300,
 }
 
-DB_VIEW_KEY = "12345"  # demo: clave para ver la BD
+# Demo: clave de acceso a "Base de datos" (NO se muestra en UI ni bot)
+DB_VIEW_KEY = "12345"
 
 # ---------------------------------------------------------------------
 # Base de datos (en /tmp para que sea escribible en la nube)
@@ -902,37 +903,28 @@ with sec4:
             )
 
 # ---------------------------------------------------------------------
-# 5) 📦 Base de datos (viewer con clave 12345)
+# 5) 📦 Base de datos (viewer con clave, SIN pistas)
 # ---------------------------------------------------------------------
 with sec5:
-    st.subheader("📦 Datos guardados en SQLite")
+    st.subheader("📦 Base de datos")
 
-    # Si ya está desbloqueado, mostramos botón para bloquear
     topA, topB = st.columns([3, 1])
-    with topA:
-        st.caption("Acceso protegido por clave (demo).")
     with topB:
-        if st.session_state["db_unlocked"]:
-            if st.button("🔒 Bloquear BD"):
-                st.session_state["db_unlocked"] = False
-                st.rerun()
+        if st.session_state["db_unlocked"] and st.button("🔒 Bloquear"):
+            st.session_state["db_unlocked"] = False
+            st.rerun()
 
     if not st.session_state["db_unlocked"]:
-        key = st.text_input("Ingresar clave para ver la base de datos", type="password", key="db_key_input")
-        if key == DB_VIEW_KEY:
-            st.session_state["db_unlocked"] = True
-            st.success("Clave correcta. BD desbloqueada.")
-            st.rerun()
-        else:
-            st.info("Ingrese la clave **12345** para mostrar las tablas.")
+        key = st.text_input("Clave de acceso", type="password", key="db_key_input")
+        if key:
+            if key == DB_VIEW_KEY:
+                st.session_state["db_unlocked"] = True
+                st.success("Acceso concedido.")
+                st.rerun()
+            else:
+                st.error("Acceso denegado.")
     else:
         conn = get_conn()
-        try:
-            db_path_show = conn.execute("PRAGMA database_list").fetchall()[0][2]
-        except Exception:
-            db_path_show = "(ruta no disponible)"
-        st.caption(f"Archivo BD: {db_path_show}")
-
         cur = conn.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
         tables = [r[0] for r in cur.fetchall()]
@@ -961,7 +953,7 @@ with sec5:
                 st.error(f"No se pudo leer la tabla {table}: {e}")
 
 # ---------------------------------------------------------------------
-# 🤖 Helpy flotante + globito emergente cada 5s (nudge)
+# 🤖 Helpy flotante + globito emergente cada 10s (blanco)
 # ---------------------------------------------------------------------
 ctx = st.session_state.get("helpbot_ctx", None)
 ctx_json = json.dumps(ctx, ensure_ascii=False) if ctx else "null"
@@ -1000,20 +992,20 @@ HELPBOT_INJECT_TEMPLATE = r"""
       }
       #mv-helpbot-fab:hover { transform: translateY(-1px); }
 
-      /* Nudge (globito) */
+      /* Nudge (globito) - BLANCO */
       #mv-helpbot-nudge {
         position: fixed;
-        right: 84px;  /* a la izquierda del bot */
-        bottom: 98px; /* alineado con el FAB (subido) */
+        right: 84px;
+        bottom: 98px;
         z-index: 2147483000;
         max-width: 260px;
-        background: rgba(20,20,20,.85);
-        border: 1px solid rgba(255,255,255,.12);
-        color: rgba(255,255,255,.92);
+        background: rgba(255,255,255,.96);
+        border: 1px solid rgba(0,0,0,.10);
+        color: rgba(0,0,0,.88);
         padding: 10px 12px;
         border-radius: 14px;
-        box-shadow: 0 12px 35px rgba(0,0,0,.35);
-        backdrop-filter: blur(14px);
+        box-shadow: 0 12px 35px rgba(0,0,0,.28);
+        backdrop-filter: blur(6px);
         font-size: 12.5px;
         line-height: 1.25;
         opacity: 0;
@@ -1139,8 +1131,6 @@ HELPBOT_INJECT_TEMPLATE = r"""
         color: rgba(255,255,255,.92);
       }
       #mv-helpbot-send:hover { background: rgba(255,255,255,.16); }
-
-      #mv-helpbot-hint { font-size: 11px; color: rgba(255,255,255,.55); margin-top: 8px; }
     `;
     doc.head.appendChild(style);
 
@@ -1183,8 +1173,7 @@ HELPBOT_INJECT_TEMPLATE = r"""
       { label: "📅 Cronograma", q: "¿Cómo genero el cronograma?" },
       { label: "💾 Guardar caso", q: "¿Cómo guardo un caso?" },
       { label: "📈 TCEA vs TREA", q: "Explícame por qué TCEA y TREA salen diferentes" },
-      { label: "⬇️ Descargar CSV", q: "¿Cómo descargo el CSV?" },
-      { label: "🗄️ Base de datos", q: "¿Cómo veo la base de datos?" },
+      { label: "⬇️ Descargar CSV", q: "¿Cómo descargo el CSV?" }
     ];
 
     const NUDGES = [
@@ -1192,8 +1181,8 @@ HELPBOT_INJECT_TEMPLATE = r"""
       "Tip: genera el cronograma y luego guarda el caso 💾",
       "¿No entiendes TCEA/TREA? Pregúntame y te lo explico fácil 🙂",
       "¿Quieres exportar? Tienes botón para descargar CSV ⬇️",
-      "🗄️ Para ver BD: pestaña Base de datos y clave 12345",
     ];
+
     let nudgeIdx = 0;
     let nudgeTimer = null;
 
@@ -1209,14 +1198,12 @@ HELPBOT_INJECT_TEMPLATE = r"""
     }
 
     function showNudge(){
-      // solo si el panel está cerrado
       if (panel.style.display === "flex") return;
       const msg = NUDGES[nudgeIdx % NUDGES.length];
       nudgeIdx++;
 
       nudge.textContent = msg;
       nudge.style.display = "block";
-      // reflow
       void nudge.offsetHeight;
       nudge.classList.add("show");
 
@@ -1231,9 +1218,8 @@ HELPBOT_INJECT_TEMPLATE = r"""
 
     function startNudges(){
       if (nudgeTimer) return;
-      // primer mensaje
       setTimeout(showNudge, 2000);
-      nudgeTimer = setInterval(showNudge, 5000);
+      nudgeTimer = setInterval(showNudge, 10000); // cada 10s
     }
 
     function stopNudges(){
@@ -1258,13 +1244,6 @@ HELPBOT_INJECT_TEMPLATE = r"""
       body.appendChild(wrap);
       body.scrollTop = body.scrollHeight;
       persist();
-    }
-
-    function addHint(){
-      const h = doc.createElement("div");
-      h.id = "mv-helpbot-hint";
-      h.textContent = "Tip: escribe: cliente, cronograma, guardar caso, TCEA, TREA, CSV, base de datos.";
-      body.appendChild(h);
     }
 
     function renderChips(){
@@ -1312,12 +1291,9 @@ HELPBOT_INJECT_TEMPLATE = r"""
       if (!Array.isArray(msgs) || msgs.length === 0){
         addMsg("bot",
 `Hola 👋 Soy Helpy 🤖
-Puedo responder preguntas sobre el uso de la plataforma.
-Tip: usa los botones rápidos arriba.`);
-        addHint();
+Puedo responder preguntas sobre cómo usar la plataforma.`);
       } else {
         msgs.forEach(m => addMsg(m.role, m.text));
-        addHint();
       }
     }
 
@@ -1341,15 +1317,14 @@ Tip: usa los botones rápidos arriba.`);
 `No son lo mismo porque miran flujos distintos:
 
 1) TCEA (cliente) = “cuánto te cuesta a ti”.
-- En t0 tú recibes: préstamo - comisión apertura = ${money(sym, p)} - ${money(sym, fee)} = ${money(sym, (p - fee))}
-- Luego tú PAGAS cada mes: Cuota Total = cuota + desgravamen + gasto adm
-  Ejemplo mensual: ${money(sym, cuota)} + ${money(sym, segM)} + ${money(sym, admM)} = ${money(sym, cuotaTot)}
+- En t0 tú recibes: préstamo - comisión apertura
+- Luego tú pagas: Cuota Total = cuota + desgravamen + gasto adm
+  Ejemplo: ${money(sym, cuota)} + ${money(sym, segM)} + ${money(sym, admM)} = ${money(sym, cuotaTot)}
 ➡️ Por eso sale TCEA = ${tcea}
 
-2) TREA (entidad) = “cuánto gana el banco”.
-Hay dos formas:
-- TREA (crédito): cuenta solo la ‘Cuota’ del préstamo (sin cargos) → ${treaC}
-- TREA (total cobros): si metes también seguro+adm como cobros → ${treaT}`
+2) TREA (entidad) = “cuánto gana la entidad”.
+- TREA (crédito): solo ‘Cuota’ del préstamo → ${treaC}
+- TREA (total cobros): si metes también cargos → ${treaT}`
       );
     }
 
@@ -1361,7 +1336,7 @@ Hay dos formas:
         return explainTceaTreaWithNumbers();
       }
       if (q.includes("tcea") || q.includes("trea") || q.includes("tir") || q.includes("tirm")) {
-        return "TCEA = costo anual efectivo para el CLIENTE. TREA = rentabilidad anual efectiva para la ENTIDAD. Si quieres, dime: “Explícame por qué TCEA y TREA salen diferentes”.";
+        return "TCEA = costo anual efectivo para el cliente. TREA = rentabilidad anual efectiva para la entidad. Si quieres, dime: “Explícame por qué TCEA y TREA salen diferentes”.";
       }
 
       if (q.includes("login") || q.includes("iniciar") || q.includes("sesion") || q.includes("sesión") || q.includes("contraseña") || q.includes("usuario")) {
@@ -1389,14 +1364,10 @@ Hay dos formas:
       }
 
       if (q.includes("base de datos") || q.includes("bd") || q.includes("sqlite") || q.includes("tabla")) {
-        return "Base de datos: pestaña '📦 Base de datos'. Ingresa la clave **12345** para ver tablas y descargar CSV. Ojo: si usas /tmp en Streamlit Cloud, la BD puede reiniciarse.";
+        return "En la pestaña correspondiente puedes acceder si tienes la clave de acceso asignada por el administrador.";
       }
 
-      if (q.includes("moneda") || q.includes("usd") || q.includes("pen") || q.includes("tipo de cambio") || q.includes("tc")) {
-        return "La app maneja PEN/USD. Usa TC fijo 1 USD = 3.75 PEN para normalizar ingresos cuando se calcula cuota/ingreso.";
-      }
-
-      return "Te ayudo con: clientes, cronograma, guardar casos, TCEA/TREA, CSV y base de datos. Usa los botones rápidos o escribe tu duda.";
+      return "Te ayudo con: clientes, cronograma, guardar casos, TCEA/TREA y exportación CSV. Escribe tu duda.";
     }
 
     function sendMsg(){
@@ -1406,14 +1377,13 @@ Hay dos formas:
       addMsg("bot", respond(q));
     }
 
-    // Nudges empiezan siempre
     startNudges();
 
     fab.addEventListener("click", () => {
       const isOpen = panel.style.display === "flex";
       panel.style.display = isOpen ? "none" : "flex";
       if (!isOpen){
-        stopNudges(); // mientras está abierto, no molestamos
+        stopNudges();
         renderChips();
         load();
         setTimeout(() => input.focus(), 50);
@@ -1438,6 +1408,4 @@ Hay dos formas:
 """
 
 HELPBOT_INJECT = HELPBOT_INJECT_TEMPLATE.replace("__CTX__", ctx_json)
-
-# Render en iframe mínimo (el bot vive en el parent)
 components.html(HELPBOT_INJECT, height=1)
