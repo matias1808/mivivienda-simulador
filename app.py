@@ -57,7 +57,7 @@ def _table_exists(cur: sqlite3.Cursor, name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _get_columns(cur: sqlite3.Cursor, table: str) -> list[str]:
+def _cols(cur: sqlite3.Cursor, table: str) -> list[str]:
     cur.execute(f"PRAGMA table_info({table})")
     return [r[1] for r in cur.fetchall()]
 
@@ -67,7 +67,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # ---- core tables ----
+    # users
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +77,7 @@ def init_db():
         )
     """)
 
+    # clients
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clients(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,12 +91,17 @@ def init_db():
             notes TEXT,
             created_by TEXT,
             created_at TEXT,
-            updated_at TEXT,
-            income_currency TEXT DEFAULT 'PEN'
+            updated_at TEXT
         )
     """)
 
-    # Si no existe cases, lo creamos SIN unit_id (porque ya eliminamos unidad inmobiliaria)
+    # migración: income_currency
+    cur.execute("PRAGMA table_info(clients)")
+    ccols = [r[1] for r in cur.fetchall()]
+    if "income_currency" not in ccols:
+        cur.execute("ALTER TABLE clients ADD COLUMN income_currency TEXT DEFAULT 'PEN'")
+
+    # cases (sin unidad inmobiliaria)
     if not _table_exists(cur, "cases"):
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cases(
@@ -109,13 +115,12 @@ def init_db():
             )
         """)
 
-    # Índices
+    # índices
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_doc_id ON clients(doc_id)")
 
-    # --- LEGACY COMPAT: si tu DB vieja tiene cases.unit_id (con FK), aseguramos units exista para no romper FK ---
+    # LEGACY COMPAT: si existe cases.unit_id (BD vieja), aseguramos tabla units para no romper FK
     try:
-        cases_cols = _get_columns(cur, "cases")
-        if "unit_id" in cases_cols and not _table_exists(cur, "units"):
+        if "unit_id" in _cols(cur, "cases") and not _table_exists(cur, "units"):
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS units(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,8 +199,8 @@ def build_schedule(
     grace_partial: int = 0,
     start_date: datetime | None = None,
     fee_opening: float = 0.0,
-    monthly_insurance: float = 0.0,
-    monthly_admin_fee: float = 0.0,
+    monthly_insurance: float = 0.0,   # desgravamen (monto fijo mensual)
+    monthly_admin_fee: float = 0.0,   # gasto adm (monto fijo mensual)
     bono_monto: float = 0.0,
 ) -> pd.DataFrame:
     principal = float(principal)
@@ -213,7 +218,8 @@ def build_schedule(
         start_date = datetime.today()
 
     rows = []
-    flujo_t0 = principal - fee_opening
+    # Cliente recibe el préstamo, pero se descuenta comisión t0:
+    flujo_t0_cliente = principal - fee_opening
     rows.append({
         "Periodo": 0,
         "Fecha": start_date.strftime("%Y-%m-%d"),
@@ -225,7 +231,7 @@ def build_schedule(
         "Gasto Adm": 0.0,
         "Cuota Total": 0.0,
         "Saldo Final": principal_neto,
-        "Flujo Cliente": flujo_t0
+        "Flujo Cliente": flujo_t0_cliente
     })
 
     saldo = principal_neto
@@ -304,6 +310,32 @@ def normalize_income_to_case_currency(income_amount: float, income_cur: str, cas
         return float(income_amount) / tc
     return float(income_amount)
 
+
+def cases_has_unit_id() -> bool:
+    try:
+        cur = get_conn().cursor()
+        return "unit_id" in _cols(cur, "cases")
+    except Exception:
+        return False
+
+
+def insert_case(user: str, client_id: int, case_name: str, params_json: str):
+    cur = get_conn().cursor()
+    now = datetime.utcnow().isoformat()
+
+    if cases_has_unit_id():
+        # BD legacy: guardamos unit_id = NULL si existe columna
+        cur.execute(
+            "INSERT INTO cases(user, client_id, unit_id, case_name, params_json, created_at) VALUES(?,?,?,?,?,?)",
+            (user, client_id, None, case_name, params_json, now),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO cases(user, client_id, case_name, params_json, created_at) VALUES(?,?,?,?,?)",
+            (user, client_id, case_name, params_json, now),
+        )
+    get_conn().commit()
+
 # ---------------------------------------------------------------------
 # Autenticación (sidebar)
 # ---------------------------------------------------------------------
@@ -351,10 +383,10 @@ st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)
 st.caption("Cálculo de cronograma, TCEA/TREA y gestión de clientes (sin unidad inmobiliaria)")
 
 sec1, sec2, sec3, sec4 = st.tabs([
-    "1) Cliente",
-    "2) Configurar Préstamo",
-    "3) Guardar caso",
-    "4) Casos & KPIs",
+    "Cliente",
+    "Configurar Préstamo",
+    "Guardar caso",
+    "Casos & KPIs",
 ])
 
 # ---------------------------------------------------------------------
@@ -375,7 +407,8 @@ with sec1:
 
     if client_choice != "➕ Nuevo cliente":
         idx = client_labels.index(client_choice) - 1
-        c = clients_list[idx]; editing_client_id = c[0]
+        c = clients_list[idx]
+        editing_client_id = c[0]
         cur.execute("""
             SELECT doc_id, full_name, phone, email, income_monthly, dependents,
                    employment_type, notes, income_currency
@@ -401,9 +434,11 @@ with sec1:
             index=["Dependiente","Independiente","Mixto","Otro"].index(employment_type)
             if employment_type in ["Dependiente","Independiente","Mixto","Otro"] else 0
         )
-        income_currency = st.selectbox("Moneda del ingreso", ["PEN", "USD"],
-                                       index=0 if income_currency not in ["PEN","USD"]
-                                       else ["PEN","USD"].index(income_currency))
+        income_currency = st.selectbox(
+            "Moneda del ingreso",
+            ["PEN", "USD"],
+            index=0 if income_currency not in ["PEN","USD"] else ["PEN","USD"].index(income_currency)
+        )
     with colc3:
         notes_client = st.text_area("Notas socioeconómicas", value=notes_client)
         c1, c2 = st.columns(2)
@@ -456,7 +491,7 @@ with sec1:
             except Exception as e:
                 st.error("No se pudo guardar el cliente: " + str(e))
 
-    # ---------- BORRAR CLIENTE (confirmación) ----------
+    # -------- BORRAR CLIENTE (confirmación) --------
     if "pending_delete_client_id" not in st.session_state:
         st.session_state.pending_delete_client_id = None
 
@@ -502,7 +537,7 @@ with sec1:
                 st.error("No se pudo borrar el cliente: " + str(e))
 
 # ---------------------------------------------------------------------
-# 2) Configurar Préstamo (ENTIDADES + CUOTA INICIAL + DESGRAVAMEN + ADM)
+# 2) Configurar Préstamo
 # ---------------------------------------------------------------------
 with sec2:
     st.subheader("Configuración del préstamo (con cuota inicial + entidad financiera)")
@@ -511,7 +546,6 @@ with sec2:
 
     with col1:
         currency = st.selectbox("Moneda", ["PEN", "USD"], index=0)
-
         valor_inmueble = st.number_input("Valor del inmueble", min_value=0.0, step=1000.0)
         cuota_inicial = st.number_input("Cuota inicial", min_value=0.0, step=1000.0)
         bono = st.number_input("Bono (Techo Propio u otro)", min_value=0.0, step=500.0)
@@ -524,23 +558,19 @@ with sec2:
     with col2:
         entidad = st.selectbox("Entidad financiera", list(FINANCIAL_ENTITIES_TEA.keys()), index=0)
         tasa_tipo = "Efectiva (TEA)"
-        tasa_anual = float(FINANCIAL_ENTITIES_TEA[entidad])  # decimal
+        tasa_anual = float(FINANCIAL_ENTITIES_TEA[entidad])
         st.number_input("TEA anual (%)", value=float(tasa_anual * 100.0), disabled=True, format="%.2f")
-
         grace_total = st.number_input("Gracia total (meses)", min_value=0, step=1)
 
     with col3:
         grace_partial = st.number_input("Gracia parcial (meses)", min_value=0, step=1)
         fee_opening = st.number_input("Comisión de apertura (t0)", min_value=0.0, step=100.0)
-
         seguro_desgravamen = st.number_input("Seguro de desgravamen (mensual)", min_value=0.0, step=10.0)
         gasto_administrativo = st.number_input("Gasto administrativo (mensual)", min_value=0.0, step=10.0)
 
     i_m = tea_to_monthly(tasa_anual)
-
     st.caption(
-        f"Entidad: {entidad} | TEA: {tasa_anual*100:.2f}% | "
-        f"TEM: {i_m*100:.5f}% | Convención 30/360 | Pagos vencidos"
+        f"Entidad: {entidad} | TEA: {tasa_anual*100:.2f}% | TEM: {i_m*100:.5f}% | Convención 30/360 | Pagos vencidos"
     )
 
     if grace_partial > grace_total:
@@ -566,7 +596,6 @@ with sec2:
             st.error("Ajuste los meses de gracia vs plazo total.")
             st.stop()
 
-        # sanity check (alertas)
         if seguro_desgravamen > monto_prestamo * 0.05:
             st.warning("El seguro de desgravamen parece muy alto vs el préstamo (revisa unidades).")
         if gasto_administrativo > monto_prestamo * 0.05:
@@ -582,7 +611,7 @@ with sec2:
             fee_opening=fee_opening,
             monthly_insurance=seguro_desgravamen,
             monthly_admin_fee=gasto_administrativo,
-            bono_monto=0.0,  # ya se descontó en monto_prestamo
+            bono_monto=0.0,
         )
 
         st.session_state["schedule_df"] = df
@@ -592,26 +621,23 @@ with sec2:
             "tasa_tipo": tasa_tipo,
             "tasa_anual": tasa_anual,
             "i_m": i_m,
-
             "valor_inmueble": valor_inmueble,
             "cuota_inicial": cuota_inicial,
             "bono": bono,
-
             "principal": monto_prestamo,
             "term_months": term_months,
             "grace_total": grace_total,
             "grace_partial": grace_partial,
-
             "fee_opening": fee_opening,
             "monthly_insurance": seguro_desgravamen,
             "monthly_admin_fee": gasto_administrativo,
-
-            "principal_mode": "NET",  # evita “restar bono” dos veces en KPIs
+            "principal_mode": "NET",
+            "generated_at": datetime.utcnow().isoformat(),
         }
         st.success("Cronograma generado. Guarda el caso en la pestaña 3)")
 
 # ---------------------------------------------------------------------
-# 3) Guardar caso (SIN unidad inmobiliaria)
+# 3) Guardar caso
 # ---------------------------------------------------------------------
 with sec3:
     st.subheader("Guardar caso (cliente + préstamo)")
@@ -625,7 +651,6 @@ with sec3:
         clients_for_save = cur.fetchall()
 
         sel_client_label_to_id = {f"{c[1]} (ID {c[0]})": c[0] for c in clients_for_save}
-
         client_label = st.selectbox("Cliente", ["- Seleccione -"] + list(sel_client_label_to_id.keys()))
         case_name = st.text_input("Nombre del caso", value="")
 
@@ -634,27 +659,15 @@ with sec3:
                 st.error("Seleccione cliente y defina un nombre para el caso")
             else:
                 client_id = sel_client_label_to_id[client_label]
-                params = {**cfg, "generated_at": datetime.utcnow().isoformat()}
-
-                cur = get_conn().cursor()
-
-                # Insert robusto: si tu DB vieja tiene unit_id, igual se puede omitir (queda NULL)
-                cur.execute(
-                    "INSERT INTO cases(user, client_id, case_name, params_json, created_at) VALUES(?,?,?,?,?)",
-                    (
-                        st.session_state.auth["user"],
-                        client_id,
-                        case_name,
-                        pd.Series(params).to_json(),
-                        datetime.utcnow().isoformat(),
-                    ),
-                )
-
-                get_conn().commit()
-                st.success("Caso guardado correctamente")
+                params_json = pd.Series(cfg).to_json()
+                try:
+                    insert_case(st.session_state.auth["user"], int(client_id), case_name, params_json)
+                    st.success("Caso guardado correctamente")
+                except Exception as e:
+                    st.error("No se pudo guardar el caso: " + str(e))
 
 # ---------------------------------------------------------------------
-# 4) Casos & KPIs (SIN unidad inmobiliaria)
+# 4) Casos & KPIs
 # ---------------------------------------------------------------------
 with sec4:
     st.subheader("Casos guardados y KPIs del caso seleccionado")
@@ -698,135 +711,146 @@ with sec4:
         """, (case_id,))
         row = cur.fetchone()
 
-        if row and row[2]:
-            case_name, client_name, params_json, cli_income, cli_income_cur = row
-            params = pd.Series(json.loads(params_json))
-
-            principal_mode = str(params.get("principal_mode", "LEGACY"))
-            bono_for_schedule = 0.0 if principal_mode == "NET" else float(params.get("bono", 0.0))
-
-            df2 = build_schedule(
-                principal=float(params.get("principal", 0.0)),
-                i_m=float(params.get("i_m", 0.0)),
-                n_months=int(float(params.get("term_months", 0)) - (float(params.get("grace_total", 0)) + float(params.get("grace_partial", 0)))),
-                grace_total=int(float(params.get("grace_total", 0))),
-                grace_partial=int(float(params.get("grace_partial", 0))),
-                start_date=datetime.today(),
-                fee_opening=float(params.get("fee_opening", 0.0)),
-                monthly_insurance=float(params.get("monthly_insurance", 0.0)),
-                monthly_admin_fee=float(params.get("monthly_admin_fee", 0.0)),
-                bono_monto=bono_for_schedule,
-            )
-
-            cashflows = df2["Flujo Cliente"].to_numpy()
-            irr_m = irr(cashflows)
-            tcea = (1 + irr_m) ** 12 - 1 if np.isfinite(irr_m) else np.nan
-
-            case_currency = str(params.get("currency", "PEN"))
-            symbol = "S/." if case_currency == "PEN" else "$"
-
-            principal_bruto = float(params.get("principal", 0.0))
-            bono = float(params.get("bono", 0.0))
-            principal_neto = principal_bruto if principal_mode == "NET" else max(0.0, principal_bruto - bono)
-
-            g_total = int(float(params.get("grace_total", 0)))
-            g_parcial = int(float(params.get("grace_partial", 0)))
-            n_total = int(float(params.get("term_months", 0)))
-            n_amort = max(0, n_total - (g_total + g_parcial))
-            i_m = float(params.get("i_m", float("nan")))
-
-            mask_amort = df2["Amortización"] > 0
-            if mask_amort.any():
-                primera = df2.loc[mask_amort].iloc[0]
-                cuota_francesa = float(primera["Cuota"])
-                cuota_inicial_total = float(primera["Cuota Total"])
-                fecha_primera_cuota = str(primera["Fecha"])
-            else:
-                cuota_francesa = 0.0
-                cuota_inicial_total = 0.0
-                fecha_primera_cuota = "-"
-
-            df_pos = df2[df2["Periodo"] > 0]
-            interes_total = float(df_pos["Interés"].sum())
-            amort_total   = float(df_pos["Amortización"].sum())
-            seg_total     = float(df_pos["Seguro"].sum())
-            gadm_total    = float(df_pos["Gasto Adm"].sum())
-            costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
-
-            ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0, cli_income_cur or "PEN", case_currency, EXCHANGE_RATE)
-            ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0 if ingreso_norm > 0 else np.nan
-
-            fee_opening = float(params.get("fee_opening", 0.0))
-            cf_ent = [-principal_bruto + fee_opening]
-            for _, r in df_pos.iterrows():
-                cf_ent.append(float(r["Cuota"]) + float(r["Seguro"]) + float(r["Gasto Adm"]))
-            irr_m_ent = irr(np.array(cf_ent, dtype=float))
-            trea = (1 + irr_m_ent) ** 12 - 1 if np.isfinite(irr_m_ent) else np.nan
-
-            entidad = str(params.get("entidad", "-"))
-            tea_case = float(params.get("tasa_anual", np.nan))
-            valor_inmueble = float(params.get("valor_inmueble", np.nan))
-            cuota_ini = float(params.get("cuota_inicial", np.nan))
-
-            with st.expander("📄 Detalle del caso", expanded=True):
-                st.write(f"**Caso**: #{case_id} – {case_name}")
-                st.write(f"**Cliente**: {client_name or '-'}")
-                if entidad != "-":
-                    if np.isfinite(tea_case):
-                        st.write(f"**Entidad**: {entidad} | **TEA**: {tea_case*100:.2f}%")
-                    else:
-                        st.write(f"**Entidad**: {entidad}")
-                if np.isfinite(valor_inmueble) and np.isfinite(cuota_ini):
-                    st.write(f"**Valor inmueble**: {symbol} {valor_inmueble:,.2f} | **Cuota inicial**: {symbol} {cuota_ini:,.2f} | **Bono**: {symbol} {bono:,.2f}")
-
-            r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
-            with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m*100:.3f}%" if np.isfinite(irr_m) else "No converge")
-            with r1c2: st.metric("TCEA (anual efectiva)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
-            with r1c3: st.metric("TREA (anual efectiva)", f"{trea*100:.3f}%" if np.isfinite(trea) else "-")
-            with r1c4: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
-            with r1c5: st.metric("Monto financiado (neto)", f"{symbol} {principal_neto:,.2f}")
-
-            r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-            with r2c1: st.metric("Monto préstamo (principal)", f"{symbol} {principal_bruto:,.2f}")
-            with r2c2: st.metric("Bono", f"{symbol} {bono:,.2f}")
-            with r2c3: st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
-            with r2c4: st.metric("Plazo amortización (meses)", f"{n_amort}")
-
-            r3c1, r3c2, r3c3, r3c4 = st.columns(4)
-            with r3c1: st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
-            with r3c2: st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
-            with r3c3: st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
-            with r3c4: st.metric("1ra fecha de cuota", fecha_primera_cuota)
-
-            r4c1, r4c2, r4c3, r4c4 = st.columns(4)
-            with r4c1: st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
-            with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
-            with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
-            with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
-
-            r5c1, r5c2, r5c3, _ = st.columns(4)
-            sym_case = "S/." if case_currency == "PEN" else "$"
-            with r5c1: st.metric(f"Ingreso mensual ({case_currency})", f"{sym_case} {ingreso_norm:,.2f}")
-            with r5c2: st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
-            with r5c3: st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
-
-            st.markdown("### 📅 Cronograma del caso seleccionado")
-            st.dataframe(
-                df2.style.format({
-                    "Saldo Inicial": "{:,.2f}",
-                    "Interés": "{:,.2f}",
-                    "Amortización": "{:,.2f}",
-                    "Cuota": "{:,.2f}",
-                    "Seguro": "{:,.2f}",
-                    "Gasto Adm": "{:,.2f}",
-                    "Cuota Total": "{:,.2f}",
-                    "Saldo Final": "{:,.2f}",
-                    "Flujo Cliente": "{:,.2f}",
-                }),
-                use_container_width=True
-            )
-            csv2 = df2.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ Descargar cronograma (CSV)", csv2,
-                               file_name=f"cronograma_caso_{case_id}.csv", mime="text/csv")
-        else:
+        if not (row and row[2]):
             st.error("No se pudo leer el caso seleccionado")
+            st.stop()
+
+        case_name, client_name, params_json, cli_income, cli_income_cur = row
+        params = pd.Series(json.loads(params_json))
+
+        principal_mode = str(params.get("principal_mode", "LEGACY"))
+        bono_for_schedule = 0.0 if principal_mode == "NET" else float(params.get("bono", 0.0))
+
+        df2 = build_schedule(
+            principal=float(params.get("principal", 0.0)),
+            i_m=float(params.get("i_m", 0.0)),
+            n_months=int(float(params.get("term_months", 0)) - (float(params.get("grace_total", 0)) + float(params.get("grace_partial", 0)))),
+            grace_total=int(float(params.get("grace_total", 0))),
+            grace_partial=int(float(params.get("grace_partial", 0))),
+            start_date=datetime.today(),
+            fee_opening=float(params.get("fee_opening", 0.0)),
+            monthly_insurance=float(params.get("monthly_insurance", 0.0)),
+            monthly_admin_fee=float(params.get("monthly_admin_fee", 0.0)),
+            bono_monto=bono_for_schedule,
+        )
+
+        # ---------------- KPIs ----------------
+        cashflows_cli = df2["Flujo Cliente"].to_numpy()
+        irr_m_cli = irr(cashflows_cli)
+        tcea = (1 + irr_m_cli) ** 12 - 1 if np.isfinite(irr_m_cli) else np.nan
+
+        case_currency = str(params.get("currency", "PEN"))
+        symbol = "S/." if case_currency == "PEN" else "$"
+
+        principal = float(params.get("principal", 0.0))
+        fee_opening = float(params.get("fee_opening", 0.0))
+
+        g_total = int(float(params.get("grace_total", 0)))
+        g_parcial = int(float(params.get("grace_partial", 0)))
+        n_total = int(float(params.get("term_months", 0)))
+        n_amort = max(0, n_total - (g_total + g_parcial))
+        i_m = float(params.get("i_m", float("nan")))
+
+        mask_amort = df2["Amortización"] > 0
+        if mask_amort.any():
+            primera = df2.loc[mask_amort].iloc[0]
+            cuota_francesa = float(primera["Cuota"])
+            cuota_inicial_total = float(primera["Cuota Total"])
+            fecha_primera_cuota = str(primera["Fecha"])
+        else:
+            cuota_francesa = 0.0
+            cuota_inicial_total = 0.0
+            fecha_primera_cuota = "-"
+
+        df_pos = df2[df2["Periodo"] > 0]
+        interes_total = float(df_pos["Interés"].sum())
+        amort_total   = float(df_pos["Amortización"].sum())
+        seg_total     = float(df_pos["Seguro"].sum())
+        gadm_total    = float(df_pos["Gasto Adm"].sum())
+        costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
+
+        ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0, cli_income_cur or "PEN", case_currency, EXCHANGE_RATE)
+        ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0 if ingreso_norm > 0 else np.nan
+
+        # -------------------- TREA (BANCO) --------------------
+        # TREA Crédito: banco desembolsa principal y cobra SOLO "Cuota" (sin seguro/gasto adm)
+        cf_bank_credit = [-principal + fee_opening]
+        for _, r in df_pos.iterrows():
+            cf_bank_credit.append(float(r["Cuota"]))
+        irr_m_bank_credit = irr(np.array(cf_bank_credit, dtype=float))
+        trea_credit = (1 + irr_m_bank_credit) ** 12 - 1 if np.isfinite(irr_m_bank_credit) else np.nan
+
+        # TREA Total Cobros (opcional): incluye cargos como si fueran ingreso del banco
+        cf_bank_total = [-principal + fee_opening]
+        for _, r in df_pos.iterrows():
+            cf_bank_total.append(float(r["Cuota Total"]))
+        irr_m_bank_total = irr(np.array(cf_bank_total, dtype=float))
+        trea_total = (1 + irr_m_bank_total) ** 12 - 1 if np.isfinite(irr_m_bank_total) else np.nan
+
+        entidad = str(params.get("entidad", "-"))
+        tea_case = float(params.get("tasa_anual", np.nan))
+        valor_inmueble = float(params.get("valor_inmueble", np.nan))
+        cuota_ini = float(params.get("cuota_inicial", np.nan))
+        bono = float(params.get("bono", 0.0))
+
+        with st.expander("📄 Detalle del caso", expanded=True):
+            st.write(f"**Caso**: #{case_id} – {case_name}")
+            st.write(f"**Cliente**: {client_name or '-'}")
+            if entidad != "-":
+                if np.isfinite(tea_case):
+                    st.write(f"**Entidad**: {entidad} | **TEA**: {tea_case*100:.2f}%")
+                else:
+                    st.write(f"**Entidad**: {entidad}")
+            if np.isfinite(valor_inmueble) and np.isfinite(cuota_ini):
+                st.write(f"**Valor inmueble**: {symbol} {valor_inmueble:,.2f} | **Cuota inicial**: {symbol} {cuota_ini:,.2f} | **Bono**: {symbol} {bono:,.2f}")
+
+        # KPIs principales
+        r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
+        with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m_cli*100:.3f}%" if np.isfinite(irr_m_cli) else "No converge")
+        with r1c2: st.metric("TCEA (cliente)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
+        with r1c3: st.metric("TREA (crédito)", f"{trea_credit*100:.3f}%" if np.isfinite(trea_credit) else "-")
+        with r1c4: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
+        with r1c5: st.metric("Monto préstamo", f"{symbol} {principal:,.2f}")
+
+        st.caption(f"TREA Total Cobros (cuota+seguro+adm): {trea_total*100:.3f}%" if np.isfinite(trea_total) else "TREA Total Cobros: -")
+
+        r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+        with r2c1: st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
+        with r2c2: st.metric("Plazo amortización (meses)", f"{n_amort}")
+        with r2c3: st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
+        with r2c4: st.metric("1ra fecha de cuota", fecha_primera_cuota)
+
+        r3c1, r3c2, r3c3, r3c4 = st.columns(4)
+        with r3c1: st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
+        with r3c2: st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
+        with r3c3: st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
+        with r3c4: st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
+
+        r4c1, r4c2, r4c3, r4c4 = st.columns(4)
+        with r4c1: st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
+        with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
+        with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
+        with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
+
+        st.markdown("### 📅 Cronograma del caso seleccionado")
+        st.dataframe(
+            df2.style.format({
+                "Saldo Inicial": "{:,.2f}",
+                "Interés": "{:,.2f}",
+                "Amortización": "{:,.2f}",
+                "Cuota": "{:,.2f}",
+                "Seguro": "{:,.2f}",
+                "Gasto Adm": "{:,.2f}",
+                "Cuota Total": "{:,.2f}",
+                "Saldo Final": "{:,.2f}",
+                "Flujo Cliente": "{:,.2f}",
+            }),
+            use_container_width=True
+        )
+        csv2 = df2.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⬇️ Descargar cronograma (CSV)",
+            csv2,
+            file_name=f"cronograma_caso_{case_id}.csv",
+            mime="text/csv"
+        )
