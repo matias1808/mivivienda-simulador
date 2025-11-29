@@ -12,15 +12,17 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ---------------------------------------------------------------------
 # Configuración general
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
 
-EXCHANGE_RATE = 3.75  # 1 USD = 3.75 PEN
+EXCHANGE_RATE = 3.75  # 1 USD = 3.75 PEN (para normalizar ingresos)
 
 # --- Entidades financieras (TEA anual) ---
+# Ajusta estos valores si tienes tu lista “real” final.
 FINANCIAL_ENTITIES_TEA = {
     "BBVA": 0.1368,
     "Banco de Comercio": 0.1250,
@@ -202,8 +204,8 @@ def build_schedule(
     grace_partial: int = 0,
     start_date: Optional[datetime] = None,
     fee_opening: float = 0.0,
-    monthly_insurance: float = 0.0,   # desgravamen fijo mensual
-    monthly_admin_fee: float = 0.0,   # gasto adm fijo mensual
+    monthly_insurance: float = 0.0,   # desgravamen (monto fijo mensual)
+    monthly_admin_fee: float = 0.0,   # gasto adm (monto fijo mensual)
     bono_monto: float = 0.0,
 ) -> pd.DataFrame:
     principal = float(principal)
@@ -248,7 +250,7 @@ def build_schedule(
         interes = saldo * i_m
 
         if t <= grace_total:
-            # gracia total: no paga cuota, interés se capitaliza
+            # gracia total: no paga cuota (interés se capitaliza)
             amort = 0.0
             cuota = 0.0
             saldo_final = saldo + interes
@@ -331,7 +333,7 @@ def insert_case(user: str, client_id: int, case_name: str, params_json: str):
     now = datetime.utcnow().isoformat()
 
     if cases_has_unit_id():
-        # BD legacy: insert con unit_id NULL para no romper
+        # BD legacy: insert con unit_id NULL
         cur.execute(
             "INSERT INTO cases(user, client_id, unit_id, case_name, params_json, created_at) VALUES(?,?,?,?,?,?)",
             (user, client_id, None, case_name, params_json, now),
@@ -387,13 +389,14 @@ if not st.session_state.auth.get("logged"):
 # UI principal
 # ---------------------------------------------------------------------
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
-st.caption("Cálculo de cronograma, TCEA/TREA y gestión de clientes (sin semáforo y sin unidad inmobiliaria)")
+st.caption("Cálculo de cronograma, TCEA/TREA y gestión de clientes")
 
-sec1, sec2, sec3, sec4 = st.tabs([
+sec1, sec2, sec3, sec4, sec5 = st.tabs([
     "Cliente",
     "Configurar Préstamo",
     "Guardar caso",
     "Casos & KPIs",
+    "📦 Base de datos",
 ])
 
 # ---------------------------------------------------------------------
@@ -585,60 +588,63 @@ with sec2:
         st.warning("La suma de gracia total y parcial no puede ser ≥ al plazo total.")
 
     if st.button("📅 Generar cronograma"):
+        ok = True
+
         if valor_inmueble <= 0:
             st.error("Ingrese un Valor del inmueble > 0.")
-            st.stop()
+            ok = False
         if cuota_inicial + bono > valor_inmueble:
             st.error("Cuota inicial + Bono no puede ser mayor que el Valor del inmueble.")
-            st.stop()
+            ok = False
         if monto_prestamo <= 0:
             st.error("El monto a financiar queda en 0. Ajusta cuota inicial/bono o valor del inmueble.")
-            st.stop()
+            ok = False
         if grace_partial > grace_total:
             st.error("Corrija los meses de gracia: parcial > total.")
-            st.stop()
+            ok = False
         if grace_total + grace_partial >= term_months:
             st.error("Ajuste los meses de gracia vs plazo total.")
-            st.stop()
+            ok = False
 
-        if seguro_desgravamen > monto_prestamo * 0.05:
-            st.warning("El seguro de desgravamen parece muy alto vs el préstamo (revisa unidades).")
-        if gasto_administrativo > monto_prestamo * 0.05:
-            st.warning("El gasto administrativo parece muy alto vs el préstamo (revisa unidades).")
+        if seguro_desgravamen > monto_prestamo * 0.05 and monto_prestamo > 0:
+            st.warning("El seguro de desgravamen parece alto vs préstamo (revisa el dato).")
+        if gasto_administrativo > monto_prestamo * 0.05 and monto_prestamo > 0:
+            st.warning("El gasto administrativo parece alto vs préstamo (revisa el dato).")
 
-        df = build_schedule(
-            principal=monto_prestamo,
-            i_m=i_m,
-            n_months=int(term_months - (grace_total + grace_partial)),
-            grace_total=int(grace_total),
-            grace_partial=int(grace_partial),
-            start_date=datetime.today(),
-            fee_opening=fee_opening,
-            monthly_insurance=seguro_desgravamen,
-            monthly_admin_fee=gasto_administrativo,
-            bono_monto=0.0,
-        )
+        if ok:
+            df = build_schedule(
+                principal=monto_prestamo,
+                i_m=i_m,
+                n_months=int(term_months - (grace_total + grace_partial)),
+                grace_total=int(grace_total),
+                grace_partial=int(grace_partial),
+                start_date=datetime.today(),
+                fee_opening=fee_opening,
+                monthly_insurance=seguro_desgravamen,
+                monthly_admin_fee=gasto_administrativo,
+                bono_monto=0.0,
+            )
 
-        st.session_state["schedule_df"] = df
-        st.session_state["schedule_cfg"] = {
-            "currency": currency,
-            "entidad": entidad,
-            "tasa_anual": tasa_anual,
-            "i_m": i_m,
-            "valor_inmueble": valor_inmueble,
-            "cuota_inicial": cuota_inicial,
-            "bono": bono,
-            "principal": monto_prestamo,
-            "term_months": term_months,
-            "grace_total": grace_total,
-            "grace_partial": grace_partial,
-            "fee_opening": fee_opening,
-            "monthly_insurance": seguro_desgravamen,
-            "monthly_admin_fee": gasto_administrativo,
-            "principal_mode": "NET",
-            "generated_at": datetime.utcnow().isoformat(),
-        }
-        st.success("Cronograma generado. Guarda el caso en la pestaña 3)")
+            st.session_state["schedule_df"] = df
+            st.session_state["schedule_cfg"] = {
+                "currency": currency,
+                "entidad": entidad,
+                "tasa_anual": tasa_anual,
+                "i_m": i_m,
+                "valor_inmueble": valor_inmueble,
+                "cuota_inicial": cuota_inicial,
+                "bono": bono,
+                "principal": monto_prestamo,
+                "term_months": term_months,
+                "grace_total": grace_total,
+                "grace_partial": grace_partial,
+                "fee_opening": fee_opening,
+                "monthly_insurance": seguro_desgravamen,
+                "monthly_admin_fee": gasto_administrativo,
+                "principal_mode": "NET",
+                "generated_at": datetime.utcnow().isoformat(),
+            }
+            st.success("Cronograma generado. Guarda el caso en la pestaña 3).")
 
 # ---------------------------------------------------------------------
 # 3) Guardar caso
@@ -671,7 +677,7 @@ with sec3:
                     st.error("No se pudo guardar el caso: " + str(e))
 
 # ---------------------------------------------------------------------
-# 4) Casos & KPIs (sin semáforo)
+# 4) Casos & KPIs
 # ---------------------------------------------------------------------
 with sec4:
     st.subheader("Casos guardados y KPIs del caso seleccionado")
@@ -687,180 +693,490 @@ with sec4:
 
     if not rows:
         st.info("Aún no hay casos guardados.")
-        st.stop()
-
-    label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[1]}": r[0] for r in rows}
-    case_label = st.selectbox("Casos", options=list(label_to_caseid.keys()), key="kpi_case_selector")
-    case_id = label_to_caseid[case_label]
-
-    del_col1, _ = st.columns([1, 3])
-    with del_col1:
-        if st.button("🗑️ Borrar este caso", key="btn_delete_case"):
-            try:
-                cur.execute("DELETE FROM cases WHERE id=?", (case_id,))
-                get_conn().commit()
-                st.success("Caso eliminado")
-                st.rerun()
-            except Exception as e:
-                st.error("No se pudo borrar el caso: " + str(e))
-                st.stop()
-
-    cur.execute("""
-        SELECT cases.case_name,
-               clients.full_name,
-               cases.params_json,
-               clients.income_monthly, clients.income_currency
-        FROM cases
-        LEFT JOIN clients ON clients.id = cases.client_id
-        WHERE cases.id=?
-    """, (case_id,))
-    row = cur.fetchone()
-
-    if not (row and row[2]):
-        st.error("No se pudo leer el caso seleccionado")
-        st.stop()
-
-    case_name, client_name, params_json, cli_income, cli_income_cur = row
-    params = pd.Series(json.loads(params_json))
-
-    principal_mode = str(params.get("principal_mode", "LEGACY"))
-    bono_for_schedule = 0.0 if principal_mode == "NET" else float(params.get("bono", 0.0))
-
-    df2 = build_schedule(
-        principal=float(params.get("principal", 0.0)),
-        i_m=float(params.get("i_m", 0.0)),
-        n_months=int(float(params.get("term_months", 0)) - (float(params.get("grace_total", 0)) + float(params.get("grace_partial", 0)))),
-        grace_total=int(float(params.get("grace_total", 0))),
-        grace_partial=int(float(params.get("grace_partial", 0))),
-        start_date=datetime.today(),
-        fee_opening=float(params.get("fee_opening", 0.0)),
-        monthly_insurance=float(params.get("monthly_insurance", 0.0)),
-        monthly_admin_fee=float(params.get("monthly_admin_fee", 0.0)),
-        bono_monto=bono_for_schedule,
-    )
-
-    # ---------------- KPIs ----------------
-    case_currency = str(params.get("currency", "PEN"))
-    symbol = "S/." if case_currency == "PEN" else "$"
-
-    # Cliente: TCEA
-    cashflows_cli = df2["Flujo Cliente"].to_numpy()
-    irr_m_cli = irr(cashflows_cli)
-    tcea = (1 + irr_m_cli) ** 12 - 1 if np.isfinite(irr_m_cli) else np.nan
-
-    principal = float(params.get("principal", 0.0))
-    fee_opening = float(params.get("fee_opening", 0.0))
-    i_m = float(params.get("i_m", float("nan")))
-
-    df_pos = df2[df2["Periodo"] > 0]
-
-    # Banco: TREA Crédito (solo "Cuota" del préstamo)
-    cf_bank_credit = [-principal + fee_opening]
-    for _, r in df_pos.iterrows():
-        cf_bank_credit.append(float(r["Cuota"]))
-    irr_m_bank_credit = irr(np.array(cf_bank_credit, dtype=float))
-    trea_credit = (1 + irr_m_bank_credit) ** 12 - 1 if np.isfinite(irr_m_bank_credit) else np.nan
-
-    # (Opcional) Total cobros como si el banco recibiera también cargos
-    cf_bank_total = [-principal + fee_opening]
-    for _, r in df_pos.iterrows():
-        cf_bank_total.append(float(r["Cuota Total"]))
-    irr_m_bank_total = irr(np.array(cf_bank_total, dtype=float))
-    trea_total = (1 + irr_m_bank_total) ** 12 - 1 if np.isfinite(irr_m_bank_total) else np.nan
-
-    g_total = int(float(params.get("grace_total", 0)))
-    g_parcial = int(float(params.get("grace_partial", 0)))
-    n_total = int(float(params.get("term_months", 0)))
-    n_amort = max(0, n_total - (g_total + g_parcial))
-
-    mask_amort = df2["Amortización"] > 0
-    if mask_amort.any():
-        primera = df2.loc[mask_amort].iloc[0]
-        cuota_francesa = float(primera["Cuota"])
-        cuota_inicial_total = float(primera["Cuota Total"])
-        fecha_primera_cuota = str(primera["Fecha"])
     else:
-        cuota_francesa = 0.0
-        cuota_inicial_total = 0.0
-        fecha_primera_cuota = "-"
+        label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[1]}": r[0] for r in rows}
+        case_label = st.selectbox("Casos", options=list(label_to_caseid.keys()), key="kpi_case_selector")
+        case_id = label_to_caseid[case_label]
 
-    interes_total = float(df_pos["Interés"].sum())
-    amort_total   = float(df_pos["Amortización"].sum())
-    seg_total     = float(df_pos["Seguro"].sum())
-    gadm_total    = float(df_pos["Gasto Adm"].sum())
-    costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
+        del_col1, _ = st.columns([1, 3])
+        with del_col1:
+            if st.button("🗑️ Borrar este caso", key="btn_delete_case"):
+                try:
+                    cur.execute("DELETE FROM cases WHERE id=?", (case_id,))
+                    get_conn().commit()
+                    st.success("Caso eliminado")
+                    st.rerun()
+                except Exception as e:
+                    st.error("No se pudo borrar el caso: " + str(e))
 
-    ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0, cli_income_cur or "PEN", case_currency, EXCHANGE_RATE)
-    ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0 if ingreso_norm > 0 else np.nan
+        cur.execute("""
+            SELECT cases.case_name,
+                   clients.full_name,
+                   cases.params_json,
+                   clients.income_monthly, clients.income_currency
+            FROM cases
+            LEFT JOIN clients ON clients.id = cases.client_id
+            WHERE cases.id=?
+        """, (case_id,))
+        row = cur.fetchone()
 
-    entidad = str(params.get("entidad", "-"))
-    tea_case = float(params.get("tasa_anual", np.nan))
-    valor_inmueble = float(params.get("valor_inmueble", np.nan))
-    cuota_ini = float(params.get("cuota_inicial", np.nan))
-    bono = float(params.get("bono", 0.0))
+        if not (row and row[2]):
+            st.error("No se pudo leer el caso seleccionado")
+        else:
+            case_name, client_name, params_json, cli_income, cli_income_cur = row
+            params = pd.Series(json.loads(params_json))
 
-    with st.expander("📄 Detalle del caso", expanded=True):
-        st.write(f"**Caso**: #{case_id} – {case_name}")
-        st.write(f"**Cliente**: {client_name or '-'}")
-        if entidad != "-":
-            if np.isfinite(tea_case):
-                st.write(f"**Entidad**: {entidad} | **TEA**: {tea_case*100:.2f}%")
-            else:
-                st.write(f"**Entidad**: {entidad}")
-        if np.isfinite(valor_inmueble) and np.isfinite(cuota_ini):
-            st.write(
-                f"**Valor inmueble**: {symbol} {valor_inmueble:,.2f} | "
-                f"**Cuota inicial**: {symbol} {cuota_ini:,.2f} | "
-                f"**Bono**: {symbol} {bono:,.2f}"
+            principal_mode = str(params.get("principal_mode", "LEGACY"))
+            bono_for_schedule = 0.0 if principal_mode == "NET" else float(params.get("bono", 0.0))
+
+            df2 = build_schedule(
+                principal=float(params.get("principal", 0.0)),
+                i_m=float(params.get("i_m", 0.0)),
+                n_months=int(float(params.get("term_months", 0)) - (float(params.get("grace_total", 0)) + float(params.get("grace_partial", 0)))),
+                grace_total=int(float(params.get("grace_total", 0))),
+                grace_partial=int(float(params.get("grace_partial", 0))),
+                start_date=datetime.today(),
+                fee_opening=float(params.get("fee_opening", 0.0)),
+                monthly_insurance=float(params.get("monthly_insurance", 0.0)),
+                monthly_admin_fee=float(params.get("monthly_admin_fee", 0.0)),
+                bono_monto=bono_for_schedule,
             )
 
-    r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
-    with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m_cli*100:.3f}%" if np.isfinite(irr_m_cli) else "No converge")
-    with r1c2: st.metric("TCEA (cliente)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
-    with r1c3: st.metric("TREA (crédito)", f"{trea_credit*100:.3f}%" if np.isfinite(trea_credit) else "-")
-    with r1c4: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
-    with r1c5: st.metric("Monto préstamo", f"{symbol} {principal:,.2f}")
+            case_currency = str(params.get("currency", "PEN"))
+            symbol = "S/." if case_currency == "PEN" else "$"
 
-    st.caption(f"TREA Total Cobros (cuota+seguro+adm): {trea_total*100:.3f}%" if np.isfinite(trea_total) else "TREA Total Cobros: -")
+            # Cliente: TCEA (IRR mensual -> anual)
+            cashflows_cli = df2["Flujo Cliente"].to_numpy()
+            irr_m_cli = irr(cashflows_cli)
+            tcea = (1 + irr_m_cli) ** 12 - 1 if np.isfinite(irr_m_cli) else np.nan
 
-    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-    with r2c1: st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
-    with r2c2: st.metric("Plazo amortización (meses)", f"{n_amort}")
-    with r2c3: st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
-    with r2c4: st.metric("1ra fecha de cuota", fecha_primera_cuota)
+            principal = float(params.get("principal", 0.0))
+            fee_opening = float(params.get("fee_opening", 0.0))
+            i_m = float(params.get("i_m", float("nan")))
+            df_pos = df2[df2["Periodo"] > 0]
 
-    r3c1, r3c2, r3c3, r3c4 = st.columns(4)
-    with r3c1: st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
-    with r3c2: st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
-    with r3c3: st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
-    with r3c4: st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
+            # Banco: TREA (crédito) usando solo la Cuota del préstamo
+            cf_bank_credit = [-principal + fee_opening]
+            for _, r in df_pos.iterrows():
+                cf_bank_credit.append(float(r["Cuota"]))
+            irr_m_bank_credit = irr(np.array(cf_bank_credit, dtype=float))
+            trea_credit = (1 + irr_m_bank_credit) ** 12 - 1 if np.isfinite(irr_m_bank_credit) else np.nan
 
-    r4c1, r4c2, r4c3, r4c4 = st.columns(4)
-    with r4c1: st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
-    with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
-    with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
-    with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
+            # Banco: TREA “Total cobros” si consideramos Cuota Total (cuota + seguro + gastos)
+            cf_bank_total = [-principal + fee_opening]
+            for _, r in df_pos.iterrows():
+                cf_bank_total.append(float(r["Cuota Total"]))
+            irr_m_bank_total = irr(np.array(cf_bank_total, dtype=float))
+            trea_total = (1 + irr_m_bank_total) ** 12 - 1 if np.isfinite(irr_m_bank_total) else np.nan
 
-    st.markdown("### 📅 Cronograma del caso seleccionado")
-    st.dataframe(
-        df2.style.format({
-            "Saldo Inicial": "{:,.2f}",
-            "Interés": "{:,.2f}",
-            "Amortización": "{:,.2f}",
-            "Cuota": "{:,.2f}",
-            "Seguro": "{:,.2f}",
-            "Gasto Adm": "{:,.2f}",
-            "Cuota Total": "{:,.2f}",
-            "Saldo Final": "{:,.2f}",
-            "Flujo Cliente": "{:,.2f}",
-        }),
-        use_container_width=True
-    )
+            g_total = int(float(params.get("grace_total", 0)))
+            g_parcial = int(float(params.get("grace_partial", 0)))
+            n_total = int(float(params.get("term_months", 0)))
+            n_amort = max(0, n_total - (g_total + g_parcial))
 
-    csv2 = df2.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "⬇️ Descargar cronograma (CSV)",
-        csv2,
-        file_name=f"cronograma_caso_{case_id}.csv",
-        mime="text/csv"
-    )
+            mask_amort = df2["Amortización"] > 0
+            if mask_amort.any():
+                primera = df2.loc[mask_amort].iloc[0]
+                cuota_francesa = float(primera["Cuota"])
+                cuota_inicial_total = float(primera["Cuota Total"])
+                fecha_primera_cuota = str(primera["Fecha"])
+            else:
+                cuota_francesa = 0.0
+                cuota_inicial_total = 0.0
+                fecha_primera_cuota = "-"
+
+            interes_total = float(df_pos["Interés"].sum())
+            amort_total   = float(df_pos["Amortización"].sum())
+            seg_total     = float(df_pos["Seguro"].sum())
+            gadm_total    = float(df_pos["Gasto Adm"].sum())
+            costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
+
+            ingreso_norm = normalize_income_to_case_currency(cli_income or 0.0, cli_income_cur or "PEN", case_currency, EXCHANGE_RATE)
+            ratio_cuota_ingreso = (cuota_inicial_total / ingreso_norm) * 100.0 if ingreso_norm > 0 else np.nan
+
+            entidad = str(params.get("entidad", "-"))
+            tea_case = float(params.get("tasa_anual", np.nan))
+            valor_inmueble = float(params.get("valor_inmueble", np.nan))
+            cuota_ini = float(params.get("cuota_inicial", np.nan))
+            bono = float(params.get("bono", 0.0))
+
+            with st.expander("📄 Detalle del caso", expanded=True):
+                st.write(f"**Caso**: #{case_id} – {case_name}")
+                st.write(f"**Cliente**: {client_name or '-'}")
+                if entidad != "-":
+                    if np.isfinite(tea_case):
+                        st.write(f"**Entidad**: {entidad} | **TEA**: {tea_case*100:.2f}%")
+                    else:
+                        st.write(f"**Entidad**: {entidad}")
+                if np.isfinite(valor_inmueble) and np.isfinite(cuota_ini):
+                    st.write(
+                        f"**Valor inmueble**: {symbol} {valor_inmueble:,.2f} | "
+                        f"**Cuota inicial**: {symbol} {cuota_ini:,.2f} | "
+                        f"**Bono**: {symbol} {bono:,.2f}"
+                    )
+
+            r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
+            with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m_cli*100:.3f}%" if np.isfinite(irr_m_cli) else "No converge")
+            with r1c2: st.metric("TCEA (cliente)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
+            with r1c3: st.metric("TREA (crédito)", f"{trea_credit*100:.3f}%" if np.isfinite(trea_credit) else "-")
+            with r1c4: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
+            with r1c5: st.metric("Monto préstamo", f"{symbol} {principal:,.2f}")
+
+            st.caption(f"TREA Total Cobros (cuota+seguro+adm): {trea_total*100:.3f}%" if np.isfinite(trea_total) else "TREA Total Cobros: -")
+
+            r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+            with r2c1: st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
+            with r2c2: st.metric("Plazo amortización (meses)", f"{n_amort}")
+            with r2c3: st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
+            with r2c4: st.metric("1ra fecha de cuota", fecha_primera_cuota)
+
+            r3c1, r3c2, r3c3, r3c4 = st.columns(4)
+            with r3c1: st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
+            with r3c2: st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
+            with r3c3: st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
+            with r3c4: st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
+
+            r4c1, r4c2, r4c3, r4c4 = st.columns(4)
+            with r4c1: st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
+            with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
+            with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
+            with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
+
+            st.markdown("### 📅 Cronograma del caso seleccionado")
+            st.dataframe(
+                df2.style.format({
+                    "Saldo Inicial": "{:,.2f}",
+                    "Interés": "{:,.2f}",
+                    "Amortización": "{:,.2f}",
+                    "Cuota": "{:,.2f}",
+                    "Seguro": "{:,.2f}",
+                    "Gasto Adm": "{:,.2f}",
+                    "Cuota Total": "{:,.2f}",
+                    "Saldo Final": "{:,.2f}",
+                    "Flujo Cliente": "{:,.2f}",
+                }),
+                use_container_width=True
+            )
+
+            csv2 = df2.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇️ Descargar cronograma (CSV)",
+                csv2,
+                file_name=f"cronograma_caso_{case_id}.csv",
+                mime="text/csv"
+            )
+
+# ---------------------------------------------------------------------
+# 5) 📦 Base de datos (viewer)
+# ---------------------------------------------------------------------
+with sec5:
+    st.subheader("📦 Datos guardados en SQLite")
+
+    # 🔒 Por defecto solo admin (pero sin st.stop para que el bot flotante siga apareciendo)
+    if st.session_state.auth.get("user") != "admin":
+        st.info("Esta vista está habilitada solo para el usuario **admin**.")
+    else:
+        conn = get_conn()
+        try:
+            db_path_show = conn.execute("PRAGMA database_list").fetchall()[0][2]
+        except Exception:
+            db_path_show = "(ruta no disponible)"
+        st.caption(f"Archivo BD: {db_path_show}")
+
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
+        tables = [r[0] for r in cur.fetchall()]
+
+        if not tables:
+            st.warning("No hay tablas en la base de datos.")
+        else:
+            colA, colB = st.columns([2, 1])
+            with colA:
+                table = st.selectbox("Tabla", tables, index=tables.index("clients") if "clients" in tables else 0)
+            with colB:
+                limit = st.number_input("Máx. filas", min_value=10, max_value=5000, value=500, step=50)
+
+            try:
+                df = pd.read_sql_query(f"SELECT * FROM {table} ORDER BY 1 DESC LIMIT {int(limit)}", conn)
+                st.dataframe(df, use_container_width=True)
+
+                st.download_button(
+                    f"⬇️ Descargar {table}.csv",
+                    df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{table}.csv",
+                    mime="text/csv"
+                )
+            except Exception as e:
+                st.error(f"No se pudo leer la tabla {table}: {e}")
+
+# ---------------------------------------------------------------------
+# 🤖 Bot de ayuda flotante (abajo derecha)
+# - Se inyecta al DOM del parent para que funcione "fixed" sobre toda la app
+# ---------------------------------------------------------------------
+HELPBOT_INJECT = r"""
+<script>
+(function () {
+  try {
+    const parentWin = window.parent;
+    const doc = parentWin && parentWin.document;
+    if (!doc) throw new Error("No parent document");
+
+    // Elimina si ya existe (por reruns)
+    const old = doc.getElementById("mv-helpbot-root");
+    if (old) old.remove();
+    const styleOld = doc.getElementById("mv-helpbot-style");
+    if (styleOld) styleOld.remove();
+
+    // CSS
+    const style = doc.createElement("style");
+    style.id = "mv-helpbot-style";
+    style.textContent = `
+      #mv-helpbot-root * { box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+      #mv-helpbot-fab {
+        position: fixed; right: 18px; bottom: 18px; z-index: 2147483000;
+        width: 56px; height: 56px; border-radius: 999px;
+        border: 1px solid rgba(255,255,255,.14);
+        cursor: pointer;
+        background: rgba(30,30,30,.55);
+        backdrop-filter: blur(10px);
+        box-shadow: 0 10px 30px rgba(0,0,0,.25);
+        display: grid; place-items: center;
+        user-select: none;
+      }
+      #mv-helpbot-fab:hover { transform: translateY(-1px); }
+
+      #mv-helpbot-panel {
+        position: fixed; right: 18px; bottom: 86px; z-index: 2147483000;
+        width: 340px; max-width: calc(100vw - 36px);
+        height: 460px; max-height: calc(100vh - 120px);
+        border-radius: 16px;
+        overflow: hidden;
+        background: rgba(20,20,20,.80);
+        backdrop-filter: blur(14px);
+        border: 1px solid rgba(255,255,255,.12);
+        box-shadow: 0 16px 45px rgba(0,0,0,.35);
+        display: none;
+      }
+      #mv-helpbot-header {
+        padding: 12px 12px;
+        display:flex; align-items:center; justify-content:space-between;
+        background: rgba(255,255,255,.06);
+        border-bottom: 1px solid rgba(255,255,255,.10);
+        color: rgba(255,255,255,.92);
+      }
+      #mv-helpbot-title { font-weight: 700; font-size: 14px; display:flex; gap:8px; align-items:center; }
+      #mv-helpbot-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,.10); }
+      #mv-helpbot-close {
+        border:none; background: transparent; color: rgba(255,255,255,.7);
+        cursor:pointer; font-size: 16px; line-height: 1;
+      }
+      #mv-helpbot-body {
+        padding: 12px;
+        height: calc(100% - 52px - 56px);
+        overflow-y: auto;
+        color: rgba(255,255,255,.90);
+      }
+      .mv-msg { margin: 0 0 10px 0; display:flex; gap:10px; align-items:flex-start; }
+      .mv-bubble {
+        padding: 10px 12px; border-radius: 14px;
+        background: rgba(255,255,255,.08);
+        border: 1px solid rgba(255,255,255,.10);
+        font-size: 13px; line-height: 1.35;
+        white-space: pre-wrap;
+      }
+      .mv-me .mv-bubble { background: rgba(79,70,229,.22); border-color: rgba(79,70,229,.35); }
+      .mv-avatar {
+        width: 26px; height: 26px; border-radius: 8px;
+        display:grid; place-items:center;
+        background: rgba(255,255,255,.10);
+        border: 1px solid rgba(255,255,255,.10);
+        flex: 0 0 26px;
+        font-size: 14px;
+      }
+      #mv-helpbot-footer {
+        height: 56px;
+        padding: 10px 10px;
+        background: rgba(255,255,255,.06);
+        border-top: 1px solid rgba(255,255,255,.10);
+        display:flex; gap:8px; align-items:center;
+      }
+      #mv-helpbot-input {
+        width: 100%;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,.14);
+        background: rgba(0,0,0,.20);
+        color: rgba(255,255,255,.92);
+        padding: 10px 12px;
+        outline: none;
+        font-size: 13px;
+      }
+      #mv-helpbot-input::placeholder { color: rgba(255,255,255,.45); }
+      #mv-helpbot-send {
+        border:none; cursor:pointer;
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(255,255,255,.12);
+        color: rgba(255,255,255,.92);
+      }
+      #mv-helpbot-send:hover { background: rgba(255,255,255,.16); }
+      #mv-helpbot-hint { font-size: 11px; color: rgba(255,255,255,.55); margin-top: 8px; }
+    `;
+    doc.head.appendChild(style);
+
+    // Root
+    const root = doc.createElement("div");
+    root.id = "mv-helpbot-root";
+    root.innerHTML = `
+      <div id="mv-helpbot-fab" aria-label="Abrir ayuda">💬</div>
+
+      <div id="mv-helpbot-panel" role="dialog" aria-label="Bot de ayuda">
+        <div id="mv-helpbot-header">
+          <div id="mv-helpbot-title">🤖 Ayuda MiVivienda <span id="mv-helpbot-badge">FAQ</span></div>
+          <button id="mv-helpbot-close" aria-label="Cerrar">✕</button>
+        </div>
+
+        <div id="mv-helpbot-body"></div>
+
+        <div id="mv-helpbot-footer">
+          <input id="mv-helpbot-input" placeholder="Escribe tu pregunta (ej: ¿cómo guardo un caso?)" />
+          <button id="mv-helpbot-send">Enviar</button>
+        </div>
+      </div>
+    `;
+    doc.body.appendChild(root);
+
+    const STORAGE_KEY = "mivivienda_helpbot_msgs_v1";
+
+    const fab = doc.getElementById("mv-helpbot-fab");
+    const panel = doc.getElementById("mv-helpbot-panel");
+    const closeBtn = doc.getElementById("mv-helpbot-close");
+    const body = doc.getElementById("mv-helpbot-body");
+    const input = doc.getElementById("mv-helpbot-input");
+    const send = doc.getElementById("mv-helpbot-send");
+
+    function addMsg(role, text){
+      const wrap = doc.createElement("div");
+      wrap.className = "mv-msg " + (role === "me" ? "mv-me" : "mv-bot");
+      const av = doc.createElement("div");
+      av.className = "mv-avatar";
+      av.textContent = (role === "me" ? "🧑" : "🤖");
+      const bub = doc.createElement("div");
+      bub.className = "mv-bubble";
+      bub.textContent = text || "";
+      wrap.appendChild(av);
+      wrap.appendChild(bub);
+      body.appendChild(wrap);
+      body.scrollTop = body.scrollHeight;
+      persist();
+    }
+
+    function addHint(){
+      const h = doc.createElement("div");
+      h.id = "mv-helpbot-hint";
+      h.textContent = "Tip: escribe: cliente, cronograma, guardar caso, TCEA, TREA, CSV, base de datos.";
+      body.appendChild(h);
+    }
+
+    function persist(){
+      const msgs = [];
+      body.querySelectorAll(".mv-msg").forEach(m => {
+        const role = m.classList.contains("mv-me") ? "me" : "bot";
+        const text = (m.querySelector(".mv-bubble")?.innerText) || "";
+        msgs.push({role, text});
+      });
+      try { parentWin.localStorage.setItem(STORAGE_KEY, JSON.stringify(msgs)); } catch(e){}
+    }
+
+    function load(){
+      body.innerHTML = "";
+      let msgs = null;
+      try { msgs = JSON.parse(parentWin.localStorage.getItem(STORAGE_KEY)); } catch(e){}
+      if (!Array.isArray(msgs) || msgs.length === 0){
+        addMsg("bot",
+`Hola 👋 Soy el bot de ayuda.
+Pregúntame cosas sobre la plataforma, por ejemplo:
+- ¿Cómo creo un cliente?
+- ¿Cómo genero el cronograma?
+- ¿Qué es TCEA y TREA?
+- ¿Cómo descargo el CSV?
+- ¿Dónde veo la base de datos?`);
+        addHint();
+      } else {
+        msgs.forEach(m => addMsg(m.role, m.text));
+        addHint();
+      }
+    }
+
+    function respond(qRaw){
+      const q = (qRaw || "").toLowerCase().trim();
+      if (!q) return "Escribe tu pregunta y te ayudo 🙂";
+
+      if (q.includes("login") || q.includes("iniciar") || q.includes("sesion") || q.includes("sesión") || q.includes("contraseña") || q.includes("usuario")) {
+        return "Para entrar: usa el panel izquierdo (Acceso). Si no tienes cuenta: 'Registrarse'. Demo: admin/admin.";
+      }
+
+      if (q.includes("cliente") || q.includes("dni") || q.includes("documento") || q.includes("correo") || q.includes("email") || q.includes("telefono") || q.includes("teléfono")) {
+        return "Clientes: pestaña 'Cliente'. Completa Documento, Nombre, Ingreso, Dependientes, Teléfono (9 dígitos) y Email. Luego 'Guardar cliente'. Para editar: usa el selector de arriba.";
+      }
+
+      if (q.includes("cronograma") || q.includes("cuota") || q.includes("prestamo") || q.includes("préstamo") || q.includes("gracia") || q.includes("tea") || q.includes("tem") || q.includes("entidad") || q.includes("cuota inicial")) {
+        return "Cronograma: pestaña 'Configurar Préstamo'. Pon valor del inmueble, cuota inicial, bono y plazo. Elige entidad (TEA ya está). Define gracia y gastos (apertura, desgravamen, gasto adm) y presiona 'Generar cronograma'.";
+      }
+
+      if (q.includes("guardar caso") || (q.includes("guardar") && q.includes("caso")) || q === "caso" || q === "casos") {
+        return "Guardar caso: pestaña 'Guardar caso'. Primero debes generar el cronograma. Luego eliges cliente, pones nombre del caso y clic en 'Guardar caso en base de datos'.";
+      }
+
+      if (q.includes("borrar") || q.includes("eliminar")) {
+        return "Borrar: en 'Casos & KPIs' puedes borrar un caso. En 'Cliente' puedes borrar un cliente (pide confirmación y si tiene casos, puede borrar también esos casos).";
+      }
+
+      if (q.includes("tcea") || q.includes("trea") || q.includes("tir") || q.includes("tirm")) {
+        return "TCEA = costo/tasa anual efectiva para el CLIENTE (según sus flujos). TREA = rentabilidad para la ENTIDAD. Pueden ser diferentes porque usan flujos distintos (por ejemplo: cuota vs cuota total y comisiones).";
+      }
+
+      if (q.includes("csv") || q.includes("descargar") || q.includes("exportar")) {
+        return "Descargar: en 'Casos & KPIs' baja al cronograma y usa 'Descargar cronograma (CSV)'.";
+      }
+
+      if (q.includes("base de datos") || q.includes("bd") || q.includes("sqlite") || q.includes("tabla")) {
+        return "Base de datos: pestaña '📦 Base de datos' (solo admin) para ver tablas y descargar CSV. Ojo: si usas /tmp en Streamlit Cloud, la BD puede reiniciarse.";
+      }
+
+      if (q.includes("moneda") || q.includes("usd") || q.includes("pen") || q.includes("tipo de cambio") || q.includes("tc")) {
+        return "La app maneja PEN/USD. Usa TC fijo 1 USD = 3.75 PEN para normalizar ingresos cuando se calcula cuota/ingreso.";
+      }
+
+      return "Te ayudo con: clientes, cronograma, guardar casos, TCEA/TREA, CSV y base de datos. Escribe una de esas palabras y dime qué necesitas.";
+    }
+
+    function sendMsg(){
+      const q = input.value || "";
+      input.value = "";
+      addMsg("me", q);
+      addMsg("bot", respond(q));
+    }
+
+    fab.addEventListener("click", () => {
+      const isOpen = panel.style.display === "block";
+      panel.style.display = isOpen ? "none" : "block";
+      if (!isOpen){
+        load();
+        setTimeout(() => input.focus(), 50);
+      }
+    });
+
+    closeBtn.addEventListener("click", () => { panel.style.display = "none"; });
+    send.addEventListener("click", sendMsg);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMsg(); });
+
+  } catch (e) {
+    // Si el sandbox no deja acceder al parent, no hacemos nada (se evita romper la app).
+    console.warn("Helpbot inject failed:", e);
+  }
+})();
+</script>
+"""
+
+# Render en iframe mínimo (el bot vive en el parent)
+components.html(HELPBOT_INJECT, height=1)
