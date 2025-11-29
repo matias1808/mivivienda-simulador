@@ -1,5 +1,4 @@
-# app.py
-# -*- coding: utf-8 -*-
+
 import os
 import re
 import json
@@ -13,15 +12,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-
-# ---------------------------------------------------------------------
-# Configuración general
-# ---------------------------------------------------------------------
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
 
-EXCHANGE_RATE = 3.75  # 1 USD = 3.75 PEN (para normalizar ingresos)
+EXCHANGE_RATE = 3.75  
 
-# --- Entidades financieras (TEA anual) ---
+
 FINANCIAL_ENTITIES_TEA = {
     "BBVA": 0.1368,
     "Banco de Comercio": 0.1250,
@@ -36,12 +31,10 @@ FINANCIAL_ENTITIES_TEA = {
     "BanBif": 0.1300,
 }
 
-# Demo: clave de acceso a "Base de datos" (NO se muestra en UI ni bot)
+
 DB_VIEW_KEY = "12345"
 
-# ---------------------------------------------------------------------
-# Base de datos (en /tmp para que sea escribible en la nube)
-# ---------------------------------------------------------------------
+
 @st.cache_resource(show_spinner=False)
 def get_conn():
     db_path = None
@@ -74,7 +67,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # users
+    
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +77,7 @@ def init_db():
         )
     """)
 
-    # clients
+    
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clients(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,13 +95,13 @@ def init_db():
         )
     """)
 
-    # migración: income_currency
+    
     cur.execute("PRAGMA table_info(clients)")
     ccols = [r[1] for r in cur.fetchall()]
     if "income_currency" not in ccols:
         cur.execute("ALTER TABLE clients ADD COLUMN income_currency TEXT DEFAULT 'PEN'")
 
-    # cases (sin unidad inmobiliaria)
+    
     if not _table_exists(cur, "cases"):
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cases(
@@ -122,10 +115,10 @@ def init_db():
             )
         """)
 
-    # índices
+    
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_doc_id ON clients(doc_id)")
 
-    # LEGACY COMPAT: si tu BD vieja tiene cases.unit_id (FK), aseguramos tabla units para no romper FK.
+    
     try:
         if "unit_id" in _cols(cur, "cases") and not _table_exists(cur, "units"):
             cur.execute("""
@@ -148,9 +141,7 @@ def init_db():
 
 conn = init_db()
 
-# ---------------------------------------------------------------------
-# Usuarios (demo simple)
-# ---------------------------------------------------------------------
+
 def hash_password(p: str) -> str:
     return hashlib.sha256(p.encode()).hexdigest()
 
@@ -180,9 +171,7 @@ cur.execute("SELECT COUNT(*) FROM users")
 if cur.fetchone()[0] == 0:
     create_user("admin", "admin")
 
-# ---------------------------------------------------------------------
-# Finanzas
-# ---------------------------------------------------------------------
+
 def tea_to_monthly(tea: float) -> float:
     return (1.0 + float(tea)) ** (1.0 / 12.0) - 1.0
 
@@ -206,8 +195,8 @@ def build_schedule(
     grace_partial: int = 0,
     start_date: Optional[datetime] = None,
     fee_opening: float = 0.0,
-    monthly_insurance: float = 0.0,   # desgravamen (monto fijo mensual)
-    monthly_admin_fee: float = 0.0,   # gasto adm (monto fijo mensual)
+    monthly_insurance: float = 0.0,   
+    monthly_admin_fee: float = 0.0,   
     bono_monto: float = 0.0,
 ) -> pd.DataFrame:
     principal = float(principal)
@@ -226,7 +215,7 @@ def build_schedule(
 
     rows = []
 
-    # Cliente recibe el préstamo, pero se descuenta comisión en t0
+    
     flujo_t0_cliente = principal - fee_opening
     rows.append({
         "Periodo": 0,
@@ -248,23 +237,23 @@ def build_schedule(
     cuota_fija = french_payment(saldo, i_m, n_months) if n_months > 0 else 0.0
 
     for t in range(1, total_months + 1):
-        date_i = date_i + timedelta(days=30)  # 30/360
+        date_i = date_i + timedelta(days=30) 
         interes = saldo * i_m
 
         if t <= grace_total:
-            # gracia total: no paga cuota (interés se capitaliza)
+            
             amort = 0.0
             cuota = 0.0
             saldo_final = saldo + interes
             pago_cliente = -(monthly_insurance + monthly_admin_fee)
         elif t <= grace_total + grace_partial:
-            # gracia parcial: paga solo interés
+            
             amort = 0.0
             cuota = interes
             saldo_final = saldo
             pago_cliente = -(cuota + monthly_insurance + monthly_admin_fee)
         else:
-            # amortización francesa
+            
             cuota = cuota_fija
             amort = cuota - interes
             if t == total_months:
@@ -335,7 +324,7 @@ def insert_case(user: str, client_id: int, case_name: str, params_json: str):
     now = datetime.utcnow().isoformat()
 
     if cases_has_unit_id():
-        # BD legacy: insert con unit_id NULL
+        
         cur.execute(
             "INSERT INTO cases(user, client_id, unit_id, case_name, params_json, created_at) VALUES(?,?,?,?,?,?)",
             (user, client_id, None, case_name, params_json, now),
@@ -347,9 +336,7 @@ def insert_case(user: str, client_id: int, case_name: str, params_json: str):
         )
     get_conn().commit()
 
-# ---------------------------------------------------------------------
-# Autenticación (sidebar)
-# ---------------------------------------------------------------------
+
 if "auth" not in st.session_state:
     st.session_state.auth = {"logged": False, "user": None}
 
@@ -387,7 +374,6 @@ with st.sidebar:
 if not st.session_state.auth.get("logged"):
     st.stop()
 
-# Contexto del bot (solo si hay caso seleccionado)
 if "helpbot_ctx" not in st.session_state:
     st.session_state["helpbot_ctx"] = None
 
@@ -395,9 +381,7 @@ if "helpbot_ctx" not in st.session_state:
 if "db_unlocked" not in st.session_state:
     st.session_state["db_unlocked"] = False
 
-# ---------------------------------------------------------------------
-# UI principal
-# ---------------------------------------------------------------------
+
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
 st.caption("Cálculo de cronograma, TCEA/TREA y gestión de clientes")
 
@@ -409,9 +393,7 @@ sec1, sec2, sec3, sec4, sec5 = st.tabs([
     "📦 Base de datos",
 ])
 
-# ---------------------------------------------------------------------
-# 1) Cliente (CRUD)
-# ---------------------------------------------------------------------
+
 with sec1:
     st.subheader("Datos del cliente")
 
@@ -511,7 +493,7 @@ with sec1:
             except Exception as e:
                 st.error("No se pudo guardar el cliente: " + str(e))
 
-    # -------- BORRAR CLIENTE (confirmación) --------
+    
     if "pending_delete_client_id" not in st.session_state:
         st.session_state.pending_delete_client_id = None
 
@@ -556,9 +538,7 @@ with sec1:
             except Exception as e:
                 st.error("No se pudo borrar el cliente: " + str(e))
 
-# ---------------------------------------------------------------------
-# 2) Configurar Préstamo
-# ---------------------------------------------------------------------
+
 with sec2:
     st.subheader("Configuración del préstamo (con cuota inicial + entidad financiera)")
 
@@ -651,9 +631,7 @@ with sec2:
             }
             st.success("Cronograma generado. Guarda el caso en la pestaña 3).")
 
-# ---------------------------------------------------------------------
-# 3) Guardar caso
-# ---------------------------------------------------------------------
+
 with sec3:
     st.subheader("Guardar caso (cliente + préstamo)")
 
@@ -681,9 +659,7 @@ with sec3:
                 except Exception as e:
                     st.error("No se pudo guardar el caso: " + str(e))
 
-# ---------------------------------------------------------------------
-# 4) Casos & KPIs
-# ---------------------------------------------------------------------
+
 with sec4:
     st.subheader("Casos guardados y KPIs del caso seleccionado")
 
@@ -753,7 +729,7 @@ with sec4:
             case_currency = str(params.get("currency", "PEN"))
             symbol = "S/." if case_currency == "PEN" else "$"
 
-            # Cliente: TCEA
+            
             cashflows_cli = df2["Flujo Cliente"].to_numpy()
             irr_m_cli = irr(cashflows_cli)
             tcea = (1 + irr_m_cli) ** 12 - 1 if np.isfinite(irr_m_cli) else np.nan
@@ -763,14 +739,14 @@ with sec4:
             i_m = float(params.get("i_m", float("nan")))
             df_pos = df2[df2["Periodo"] > 0]
 
-            # Banco: TREA (crédito) solo Cuota (sin cargos)
+            
             cf_bank_credit = [-principal + fee_opening]
             for _, r in df_pos.iterrows():
                 cf_bank_credit.append(float(r["Cuota"]))
             irr_m_bank_credit = irr(np.array(cf_bank_credit, dtype=float))
             trea_credit = (1 + irr_m_bank_credit) ** 12 - 1 if np.isfinite(irr_m_bank_credit) else np.nan
 
-            # Banco: TREA (total cobros) Cuota Total
+            
             cf_bank_total = [-principal + fee_opening]
             for _, r in df_pos.iterrows():
                 cf_bank_total.append(float(r["Cuota Total"]))
@@ -808,7 +784,7 @@ with sec4:
             cuota_ini = float(params.get("cuota_inicial", np.nan))
             bono = float(params.get("bono", 0.0))
 
-            # Contexto para Helpy
+            
             st.session_state["helpbot_ctx"] = {
                 "case_id": int(case_id),
                 "case_name": str(case_name),
@@ -902,9 +878,7 @@ with sec4:
                 mime="text/csv"
             )
 
-# ---------------------------------------------------------------------
-# 5) 📦 Base de datos (viewer con clave, SIN pistas)
-# ---------------------------------------------------------------------
+
 with sec5:
     st.subheader("📦 Base de datos")
 
@@ -952,9 +926,7 @@ with sec5:
             except Exception as e:
                 st.error(f"No se pudo leer la tabla {table}: {e}")
 
-# ---------------------------------------------------------------------
-# 🤖 Helpy flotante + globito emergente cada 10s (blanco)
-# ---------------------------------------------------------------------
+
 ctx = st.session_state.get("helpbot_ctx", None)
 ctx_json = json.dumps(ctx, ensure_ascii=False) if ctx else "null"
 
