@@ -22,7 +22,6 @@ st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layo
 EXCHANGE_RATE = 3.75  # 1 USD = 3.75 PEN (para normalizar ingresos)
 
 # --- Entidades financieras (TEA anual) ---
-# Ajusta estos valores si tienes tu lista “real” final.
 FINANCIAL_ENTITIES_TEA = {
     "BBVA": 0.1368,
     "Banco de Comercio": 0.1250,
@@ -224,7 +223,7 @@ def build_schedule(
 
     rows = []
 
-    # Cliente recibe el préstamo, pero se descuenta comisión en t0:
+    # Cliente recibe el préstamo, pero se descuenta comisión en t0
     flujo_t0_cliente = principal - fee_opening
     rows.append({
         "Periodo": 0,
@@ -384,6 +383,10 @@ with st.sidebar:
 
 if not st.session_state.auth.get("logged"):
     st.stop()
+
+# Contexto del bot (solo si hay caso seleccionado)
+if "helpbot_ctx" not in st.session_state:
+    st.session_state["helpbot_ctx"] = None
 
 # ---------------------------------------------------------------------
 # UI principal
@@ -693,6 +696,7 @@ with sec4:
 
     if not rows:
         st.info("Aún no hay casos guardados.")
+        st.session_state["helpbot_ctx"] = None
     else:
         label_to_caseid = {f"#{r[0]} – {r[2] or 'Cliente?'} – {r[1]}": r[0] for r in rows}
         case_label = st.selectbox("Casos", options=list(label_to_caseid.keys()), key="kpi_case_selector")
@@ -705,6 +709,7 @@ with sec4:
                     cur.execute("DELETE FROM cases WHERE id=?", (case_id,))
                     get_conn().commit()
                     st.success("Caso eliminado")
+                    st.session_state["helpbot_ctx"] = None
                     st.rerun()
                 except Exception as e:
                     st.error("No se pudo borrar el caso: " + str(e))
@@ -722,6 +727,7 @@ with sec4:
 
         if not (row and row[2]):
             st.error("No se pudo leer el caso seleccionado")
+            st.session_state["helpbot_ctx"] = None
         else:
             case_name, client_name, params_json, cli_income, cli_income_cur = row
             params = pd.Series(json.loads(params_json))
@@ -745,7 +751,7 @@ with sec4:
             case_currency = str(params.get("currency", "PEN"))
             symbol = "S/." if case_currency == "PEN" else "$"
 
-            # Cliente: TCEA (IRR mensual -> anual)
+            # Cliente: TCEA
             cashflows_cli = df2["Flujo Cliente"].to_numpy()
             irr_m_cli = irr(cashflows_cli)
             tcea = (1 + irr_m_cli) ** 12 - 1 if np.isfinite(irr_m_cli) else np.nan
@@ -755,14 +761,14 @@ with sec4:
             i_m = float(params.get("i_m", float("nan")))
             df_pos = df2[df2["Periodo"] > 0]
 
-            # Banco: TREA (crédito) usando solo la Cuota del préstamo
+            # Banco: TREA (crédito) solo Cuota (sin cargos)
             cf_bank_credit = [-principal + fee_opening]
             for _, r in df_pos.iterrows():
                 cf_bank_credit.append(float(r["Cuota"]))
             irr_m_bank_credit = irr(np.array(cf_bank_credit, dtype=float))
             trea_credit = (1 + irr_m_bank_credit) ** 12 - 1 if np.isfinite(irr_m_bank_credit) else np.nan
 
-            # Banco: TREA “Total cobros” si consideramos Cuota Total (cuota + seguro + gastos)
+            # Banco: TREA (total cobros) Cuota Total
             cf_bank_total = [-principal + fee_opening]
             for _, r in df_pos.iterrows():
                 cf_bank_total.append(float(r["Cuota Total"]))
@@ -799,6 +805,34 @@ with sec4:
             valor_inmueble = float(params.get("valor_inmueble", np.nan))
             cuota_ini = float(params.get("cuota_inicial", np.nan))
             bono = float(params.get("bono", 0.0))
+
+            # Contexto para Helpy
+            st.session_state["helpbot_ctx"] = {
+                "case_id": int(case_id),
+                "case_name": str(case_name),
+                "client_name": str(client_name or ""),
+                "currency": str(case_currency),
+                "symbol": str(symbol),
+                "entidad": str(entidad),
+                "tea": float(tea_case) if np.isfinite(tea_case) else None,
+                "tem": float(i_m) if np.isfinite(i_m) else None,
+                "principal": float(principal),
+                "fee_opening": float(fee_opening),
+                "monthly_insurance": float(params.get("monthly_insurance", 0.0)),
+                "monthly_admin_fee": float(params.get("monthly_admin_fee", 0.0)),
+                "cuota": float(cuota_francesa),
+                "cuota_total": float(cuota_inicial_total),
+                "tcea": float(tcea) if np.isfinite(tcea) else None,
+                "trea_credit": float(trea_credit) if np.isfinite(trea_credit) else None,
+                "trea_total": float(trea_total) if np.isfinite(trea_total) else None,
+                "interes_total": float(interes_total),
+                "seg_total": float(seg_total),
+                "adm_total": float(gadm_total),
+                "total_pagado": float(costo_total_cliente),
+                "plazo_total": int(n_total),
+                "gracia_total": int(g_total),
+                "gracia_parcial": int(g_parcial),
+            }
 
             with st.expander("📄 Detalle del caso", expanded=True):
                 st.write(f"**Caso**: #{case_id} – {case_name}")
@@ -872,7 +906,6 @@ with sec4:
 with sec5:
     st.subheader("📦 Datos guardados en SQLite")
 
-    # 🔒 Por defecto solo admin (pero sin st.stop para que el bot flotante siga apareciendo)
     if st.session_state.auth.get("user") != "admin":
         st.info("Esta vista está habilitada solo para el usuario **admin**.")
     else:
@@ -910,10 +943,12 @@ with sec5:
                 st.error(f"No se pudo leer la tabla {table}: {e}")
 
 # ---------------------------------------------------------------------
-# 🤖 Bot de ayuda flotante (abajo derecha)
-# - Se inyecta al DOM del parent para que funcione "fixed" sobre toda la app
+# 🤖 Helpy flotante (abajo derecha, subido para no tapar Manage app)
 # ---------------------------------------------------------------------
-HELPBOT_INJECT = r"""
+ctx = st.session_state.get("helpbot_ctx", None)
+ctx_json = json.dumps(ctx, ensure_ascii=False) if ctx else "null"
+
+HELPBOT_INJECT_TEMPLATE = r"""
 <script>
 (function () {
   try {
@@ -921,19 +956,21 @@ HELPBOT_INJECT = r"""
     const doc = parentWin && parentWin.document;
     if (!doc) throw new Error("No parent document");
 
-    // Elimina si ya existe (por reruns)
+    const CTX = __CTX__;
+
     const old = doc.getElementById("mv-helpbot-root");
     if (old) old.remove();
     const styleOld = doc.getElementById("mv-helpbot-style");
     if (styleOld) styleOld.remove();
 
-    // CSS
     const style = doc.createElement("style");
     style.id = "mv-helpbot-style";
     style.textContent = `
       #mv-helpbot-root * { box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+
+      /* FAB subido para no tapar “Manage app” */
       #mv-helpbot-fab {
-        position: fixed; right: 18px; bottom: 18px; z-index: 2147483000;
+        position: fixed; right: 18px; bottom: 84px; z-index: 2147483000;
         width: 56px; height: 56px; border-radius: 999px;
         border: 1px solid rgba(255,255,255,.14);
         cursor: pointer;
@@ -945,36 +982,63 @@ HELPBOT_INJECT = r"""
       }
       #mv-helpbot-fab:hover { transform: translateY(-1px); }
 
+      /* Panel también subido */
       #mv-helpbot-panel {
-        position: fixed; right: 18px; bottom: 86px; z-index: 2147483000;
-        width: 340px; max-width: calc(100vw - 36px);
-        height: 460px; max-height: calc(100vh - 120px);
+        position: fixed; right: 18px; bottom: 152px; z-index: 2147483000;
+        width: 360px; max-width: calc(100vw - 36px);
+        height: 500px; max-height: calc(100vh - 120px);
         border-radius: 16px;
         overflow: hidden;
-        background: rgba(20,20,20,.80);
+        background: rgba(20,20,20,.82);
         backdrop-filter: blur(14px);
         border: 1px solid rgba(255,255,255,.12);
         box-shadow: 0 16px 45px rgba(0,0,0,.35);
         display: none;
+        flex-direction: column;
       }
+
       #mv-helpbot-header {
         padding: 12px 12px;
         display:flex; align-items:center; justify-content:space-between;
         background: rgba(255,255,255,.06);
         border-bottom: 1px solid rgba(255,255,255,.10);
         color: rgba(255,255,255,.92);
+        flex: 0 0 auto;
       }
       #mv-helpbot-title { font-weight: 700; font-size: 14px; display:flex; gap:8px; align-items:center; }
       #mv-helpbot-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,.10); }
+
       #mv-helpbot-close {
         border:none; background: transparent; color: rgba(255,255,255,.7);
         cursor:pointer; font-size: 16px; line-height: 1;
       }
+
+      #mv-helpbot-chips {
+        padding: 10px 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        border-bottom: 1px solid rgba(255,255,255,.10);
+        background: rgba(255,255,255,.04);
+        flex: 0 0 auto;
+      }
+      .mv-chip {
+        border: 1px solid rgba(255,255,255,.12);
+        background: rgba(255,255,255,.08);
+        color: rgba(255,255,255,.92);
+        padding: 7px 10px;
+        border-radius: 999px;
+        cursor: pointer;
+        font-size: 12px;
+        user-select: none;
+      }
+      .mv-chip:hover { background: rgba(255,255,255,.12); }
+
       #mv-helpbot-body {
         padding: 12px;
-        height: calc(100% - 52px - 56px);
         overflow-y: auto;
         color: rgba(255,255,255,.90);
+        flex: 1 1 auto;
       }
       .mv-msg { margin: 0 0 10px 0; display:flex; gap:10px; align-items:flex-start; }
       .mv-bubble {
@@ -993,12 +1057,23 @@ HELPBOT_INJECT = r"""
         flex: 0 0 26px;
         font-size: 14px;
       }
+
+      .mv-context {
+        padding: 10px 12px;
+        border-radius: 14px;
+        background: rgba(16,185,129,.10);
+        border: 1px solid rgba(16,185,129,.20);
+        margin: 0 0 10px 0;
+        font-size: 12px;
+        color: rgba(255,255,255,.92);
+      }
+
       #mv-helpbot-footer {
-        height: 56px;
         padding: 10px 10px;
         background: rgba(255,255,255,.06);
         border-top: 1px solid rgba(255,255,255,.10);
         display:flex; gap:8px; align-items:center;
+        flex: 0 0 auto;
       }
       #mv-helpbot-input {
         width: 100%;
@@ -1019,22 +1094,23 @@ HELPBOT_INJECT = r"""
         color: rgba(255,255,255,.92);
       }
       #mv-helpbot-send:hover { background: rgba(255,255,255,.16); }
+
       #mv-helpbot-hint { font-size: 11px; color: rgba(255,255,255,.55); margin-top: 8px; }
     `;
     doc.head.appendChild(style);
 
-    // Root
     const root = doc.createElement("div");
     root.id = "mv-helpbot-root";
     root.innerHTML = `
-      <div id="mv-helpbot-fab" aria-label="Abrir ayuda">💬</div>
+      <div id="mv-helpbot-fab" aria-label="Abrir Helpy">🤖</div>
 
-      <div id="mv-helpbot-panel" role="dialog" aria-label="Bot de ayuda">
+      <div id="mv-helpbot-panel" role="dialog" aria-label="Helpy">
         <div id="mv-helpbot-header">
-          <div id="mv-helpbot-title">🤖 Ayuda MiVivienda <span id="mv-helpbot-badge">FAQ</span></div>
+          <div id="mv-helpbot-title">🤖 Helpy <span id="mv-helpbot-badge">Ayuda</span></div>
           <button id="mv-helpbot-close" aria-label="Cerrar">✕</button>
         </div>
 
+        <div id="mv-helpbot-chips"></div>
         <div id="mv-helpbot-body"></div>
 
         <div id="mv-helpbot-footer">
@@ -1045,14 +1121,35 @@ HELPBOT_INJECT = r"""
     `;
     doc.body.appendChild(root);
 
-    const STORAGE_KEY = "mivivienda_helpbot_msgs_v1";
+    const STORAGE_KEY = "mivivienda_helpy_msgs_v1";
 
     const fab = doc.getElementById("mv-helpbot-fab");
     const panel = doc.getElementById("mv-helpbot-panel");
     const closeBtn = doc.getElementById("mv-helpbot-close");
+    const chips = doc.getElementById("mv-helpbot-chips");
     const body = doc.getElementById("mv-helpbot-body");
     const input = doc.getElementById("mv-helpbot-input");
     const send = doc.getElementById("mv-helpbot-send");
+
+    const QUICK = [
+      { label: "👤 Crear cliente", q: "¿Cómo creo un cliente?" },
+      { label: "📅 Cronograma", q: "¿Cómo genero el cronograma?" },
+      { label: "💾 Guardar caso", q: "¿Cómo guardo un caso?" },
+      { label: "📈 TCEA vs TREA", q: "Explícame por qué TCEA y TREA salen diferentes" },
+      { label: "⬇️ Descargar CSV", q: "¿Cómo descargo el CSV?" },
+      { label: "🗄️ Base de datos", q: "¿Cómo veo la base de datos?" },
+    ];
+
+    function money(sym, x){
+      const n = Number(x);
+      if (!isFinite(n)) return `${sym} -`;
+      return `${sym} ` + n.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
+    function pct(x){
+      const n = Number(x);
+      if (!isFinite(n)) return "-";
+      return (n*100).toFixed(3) + "%";
+    }
 
     function addMsg(role, text){
       const wrap = doc.createElement("div");
@@ -1077,6 +1174,32 @@ HELPBOT_INJECT = r"""
       body.appendChild(h);
     }
 
+    function renderChips(){
+      chips.innerHTML = "";
+      QUICK.forEach(item => {
+        const b = doc.createElement("div");
+        b.className = "mv-chip";
+        b.textContent = item.label;
+        b.addEventListener("click", () => {
+          addMsg("me", item.q);
+          addMsg("bot", respond(item.q));
+        });
+        chips.appendChild(b);
+      });
+    }
+
+    function addContextCard(){
+      if (!CTX) return;
+      const div = doc.createElement("div");
+      div.className = "mv-context";
+      const sym = CTX.symbol || "";
+      const tcea = CTX.tcea != null ? pct(CTX.tcea) : "-";
+      const trea = CTX.trea_credit != null ? pct(CTX.trea_credit) : "-";
+      div.textContent =
+        `Caso activo #${CTX.case_id}: ${CTX.case_name} | Préstamo: ${money(sym, CTX.principal)} | TCEA: ${tcea} | TREA(crédito): ${trea}`;
+      body.appendChild(div);
+    }
+
     function persist(){
       const msgs = [];
       body.querySelectorAll(".mv-msg").forEach(m => {
@@ -1089,17 +1212,15 @@ HELPBOT_INJECT = r"""
 
     function load(){
       body.innerHTML = "";
+      addContextCard();
+
       let msgs = null;
       try { msgs = JSON.parse(parentWin.localStorage.getItem(STORAGE_KEY)); } catch(e){}
       if (!Array.isArray(msgs) || msgs.length === 0){
         addMsg("bot",
-`Hola 👋 Soy el bot de ayuda.
-Pregúntame cosas sobre la plataforma, por ejemplo:
-- ¿Cómo creo un cliente?
-- ¿Cómo genero el cronograma?
-- ¿Qué es TCEA y TREA?
-- ¿Cómo descargo el CSV?
-- ¿Dónde veo la base de datos?`);
+`Hola 👋 Soy Helpy 🤖
+Puedo responder preguntas sobre el uso de la plataforma.
+Tip: usa los botones rápidos arriba.`);
         addHint();
       } else {
         msgs.forEach(m => addMsg(m.role, m.text));
@@ -1107,9 +1228,57 @@ Pregúntame cosas sobre la plataforma, por ejemplo:
       }
     }
 
+    function explainTceaTreaWithNumbers(){
+      if (!CTX) {
+        return "Aún no tengo números de un caso. Ve a 'Casos & KPIs', selecciona un caso y vuelve aquí 🙂";
+      }
+      const sym = CTX.symbol || "";
+      const p = CTX.principal;
+      const fee = CTX.fee_opening;
+      const segM = CTX.monthly_insurance;
+      const admM = CTX.monthly_admin_fee;
+      const cuota = CTX.cuota;
+      const cuotaTot = CTX.cuota_total;
+
+      const tcea = CTX.tcea != null ? pct(CTX.tcea) : "-";
+      const treaC = CTX.trea_credit != null ? pct(CTX.trea_credit) : "-";
+      const treaT = CTX.trea_total != null ? pct(CTX.trea_total) : "-";
+
+      return (
+`No son lo mismo porque miran flujos distintos:
+
+1) TCEA (cliente) = “cuánto te cuesta a ti”.
+- En t0 tú recibes: préstamo - comisión apertura = ${money(sym, p)} - ${money(sym, fee)} = ${money(sym, (p - fee))}
+- Luego tú PAGAS cada mes: Cuota Total = cuota + desgravamen + gasto adm
+  Ejemplo mensual: ${money(sym, cuota)} + ${money(sym, segM)} + ${money(sym, admM)} = ${money(sym, cuotaTot)}
+➡️ Por eso sale TCEA = ${tcea}
+
+2) TREA (entidad) = “cuánto gana el banco”.
+Hay dos formas:
+- TREA (crédito): cuenta solo la ‘Cuota’ del préstamo (sin cargos) → ${treaC}
+- TREA (total cobros): si metes también seguro+adm como cobros → ${treaT}
+
+Tu caso:
+Préstamo: ${money(sym, p)}
+Comisión apertura: ${money(sym, fee)}
+Cuota (sin cargos): ${money(sym, cuota)}
+Cuota total (con cargos): ${money(sym, cuotaTot)}
+TCEA: ${tcea}
+TREA(crédito): ${treaC}
+TREA(total cobros): ${treaT}`
+      );
+    }
+
     function respond(qRaw){
       const q = (qRaw || "").toLowerCase().trim();
       if (!q) return "Escribe tu pregunta y te ayudo 🙂";
+
+      if (q.includes("tcea") && q.includes("trea") && (q.includes("difer") || q.includes("por que") || q.includes("por qué") || q.includes("explica"))) {
+        return explainTceaTreaWithNumbers();
+      }
+      if (q.includes("tcea") || q.includes("trea") || q.includes("tir") || q.includes("tirm")) {
+        return "TCEA = costo anual efectivo para el CLIENTE. TREA = rentabilidad anual efectiva para la ENTIDAD. Si quieres, dime: “Explícame por qué TCEA y TREA salen diferentes” y te lo explico con tus números.";
+      }
 
       if (q.includes("login") || q.includes("iniciar") || q.includes("sesion") || q.includes("sesión") || q.includes("contraseña") || q.includes("usuario")) {
         return "Para entrar: usa el panel izquierdo (Acceso). Si no tienes cuenta: 'Registrarse'. Demo: admin/admin.";
@@ -1120,19 +1289,15 @@ Pregúntame cosas sobre la plataforma, por ejemplo:
       }
 
       if (q.includes("cronograma") || q.includes("cuota") || q.includes("prestamo") || q.includes("préstamo") || q.includes("gracia") || q.includes("tea") || q.includes("tem") || q.includes("entidad") || q.includes("cuota inicial")) {
-        return "Cronograma: pestaña 'Configurar Préstamo'. Pon valor del inmueble, cuota inicial, bono y plazo. Elige entidad (TEA ya está). Define gracia y gastos (apertura, desgravamen, gasto adm) y presiona 'Generar cronograma'.";
+        return "Cronograma: pestaña 'Configurar Préstamo'. Pon valor del inmueble, cuota inicial, bono y plazo. Elige entidad (TEA ya está). Define gracia y gastos y presiona 'Generar cronograma'.";
       }
 
-      if (q.includes("guardar caso") || (q.includes("guardar") && q.includes("caso")) || q === "caso" || q === "casos") {
+      if (q.includes("guardar caso") || (q.includes("guardar") && q.includes("caso"))) {
         return "Guardar caso: pestaña 'Guardar caso'. Primero debes generar el cronograma. Luego eliges cliente, pones nombre del caso y clic en 'Guardar caso en base de datos'.";
       }
 
       if (q.includes("borrar") || q.includes("eliminar")) {
         return "Borrar: en 'Casos & KPIs' puedes borrar un caso. En 'Cliente' puedes borrar un cliente (pide confirmación y si tiene casos, puede borrar también esos casos).";
-      }
-
-      if (q.includes("tcea") || q.includes("trea") || q.includes("tir") || q.includes("tirm")) {
-        return "TCEA = costo/tasa anual efectiva para el CLIENTE (según sus flujos). TREA = rentabilidad para la ENTIDAD. Pueden ser diferentes porque usan flujos distintos (por ejemplo: cuota vs cuota total y comisiones).";
       }
 
       if (q.includes("csv") || q.includes("descargar") || q.includes("exportar")) {
@@ -1147,7 +1312,7 @@ Pregúntame cosas sobre la plataforma, por ejemplo:
         return "La app maneja PEN/USD. Usa TC fijo 1 USD = 3.75 PEN para normalizar ingresos cuando se calcula cuota/ingreso.";
       }
 
-      return "Te ayudo con: clientes, cronograma, guardar casos, TCEA/TREA, CSV y base de datos. Escribe una de esas palabras y dime qué necesitas.";
+      return "Te ayudo con: clientes, cronograma, guardar casos, TCEA/TREA, CSV y base de datos. Usa los botones rápidos o escribe tu duda.";
     }
 
     function sendMsg(){
@@ -1158,25 +1323,28 @@ Pregúntame cosas sobre la plataforma, por ejemplo:
     }
 
     fab.addEventListener("click", () => {
-      const isOpen = panel.style.display === "block";
-      panel.style.display = isOpen ? "none" : "block";
+      const isOpen = panel.style.display === "flex";
+      panel.style.display = isOpen ? "none" : "flex";
       if (!isOpen){
+        renderChips();
         load();
         setTimeout(() => input.focus(), 50);
       }
     });
 
     closeBtn.addEventListener("click", () => { panel.style.display = "none"; });
+
     send.addEventListener("click", sendMsg);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMsg(); });
 
   } catch (e) {
-    // Si el sandbox no deja acceder al parent, no hacemos nada (se evita romper la app).
-    console.warn("Helpbot inject failed:", e);
+    console.warn("Helpy inject failed:", e);
   }
 })();
 </script>
 """
+
+HELPBOT_INJECT = HELPBOT_INJECT_TEMPLATE.replace("__CTX__", ctx_json)
 
 # Render en iframe mínimo (el bot vive en el parent)
 components.html(HELPBOT_INJECT, height=1)
