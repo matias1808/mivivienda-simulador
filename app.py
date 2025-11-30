@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -12,10 +11,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
 st.set_page_config(page_title="MiVivienda – Simulador", page_icon="🏠", layout="wide")
 
-EXCHANGE_RATE = 3.75  
-
+EXCHANGE_RATE = 3.75
 
 FINANCIAL_ENTITIES_TEA = {
     "BBVA": 0.1368,
@@ -30,7 +29,6 @@ FINANCIAL_ENTITIES_TEA = {
     "Financiera Confianza": 0.1230,
     "BanBif": 0.1300,
 }
-
 
 DB_VIEW_KEY = "12345"
 
@@ -67,7 +65,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    
+    # Tabla de usuarios
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +75,7 @@ def init_db():
         )
     """)
 
-    
+    # Tabla de clientes
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clients(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,13 +93,13 @@ def init_db():
         )
     """)
 
-    
+    # Campo moneda ingreso
     cur.execute("PRAGMA table_info(clients)")
     ccols = [r[1] for r in cur.fetchall()]
     if "income_currency" not in ccols:
         cur.execute("ALTER TABLE clients ADD COLUMN income_currency TEXT DEFAULT 'PEN'")
 
-    
+    # Tabla de casos
     if not _table_exists(cur, "cases"):
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cases(
@@ -115,10 +113,9 @@ def init_db():
             )
         """)
 
-    
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_doc_id ON clients(doc_id)")
 
-    
+    # Tabla units opcional
     try:
         if "unit_id" in _cols(cur, "cases") and not _table_exists(cur, "units"):
             cur.execute("""
@@ -195,8 +192,8 @@ def build_schedule(
     grace_partial: int = 0,
     start_date: Optional[datetime] = None,
     fee_opening: float = 0.0,
-    monthly_insurance: float = 0.0,   
-    monthly_admin_fee: float = 0.0,   
+    monthly_insurance: float = 0.0,   # aquí va desgravamen + inmueble
+    monthly_admin_fee: float = 0.0,
     bono_monto: float = 0.0,
 ) -> pd.DataFrame:
     principal = float(principal)
@@ -215,7 +212,7 @@ def build_schedule(
 
     rows = []
 
-    
+    # Flujo t0 cliente
     flujo_t0_cliente = principal - fee_opening
     rows.append({
         "Periodo": 0,
@@ -237,23 +234,23 @@ def build_schedule(
     cuota_fija = french_payment(saldo, i_m, n_months) if n_months > 0 else 0.0
 
     for t in range(1, total_months + 1):
-        date_i = date_i + timedelta(days=30) 
+        date_i = date_i + timedelta(days=30)  # 30/360
         interes = saldo * i_m
 
         if t <= grace_total:
-            
+            # Gracia total: capitaliza interés, cliente solo paga seguros + gastos
             amort = 0.0
             cuota = 0.0
             saldo_final = saldo + interes
             pago_cliente = -(monthly_insurance + monthly_admin_fee)
         elif t <= grace_total + grace_partial:
-            
+            # Gracia parcial: paga solo interés + seguros + gastos
             amort = 0.0
             cuota = interes
             saldo_final = saldo
             pago_cliente = -(cuota + monthly_insurance + monthly_admin_fee)
         else:
-            
+            # Periodo normal: cuota francesa
             cuota = cuota_fija
             amort = cuota - interes
             if t == total_months:
@@ -324,7 +321,6 @@ def insert_case(user: str, client_id: int, case_name: str, params_json: str):
     now = datetime.utcnow().isoformat()
 
     if cases_has_unit_id():
-        
         cur.execute(
             "INSERT INTO cases(user, client_id, unit_id, case_name, params_json, created_at) VALUES(?,?,?,?,?,?)",
             (user, client_id, None, case_name, params_json, now),
@@ -381,9 +377,8 @@ if "helpbot_ctx" not in st.session_state:
 if "db_unlocked" not in st.session_state:
     st.session_state["db_unlocked"] = False
 
-
 st.title("🏠 MiVivienda / Techo Propio – Simulador método francés (30/360)")
-st.caption("Cálculo de cronograma, TCEA/TREA y gestión de clientes")
+st.caption("Cálculo de cronograma, TCEA/TEA y gestión de clientes")
 
 sec1, sec2, sec3, sec4, sec5 = st.tabs([
     "Cliente",
@@ -393,7 +388,9 @@ sec1, sec2, sec3, sec4, sec5 = st.tabs([
     "📦 Base de datos",
 ])
 
-
+# =========================
+# PESTAÑA 1: CLIENTE
+# =========================
 with sec1:
     st.subheader("Datos del cliente")
 
@@ -493,7 +490,6 @@ with sec1:
             except Exception as e:
                 st.error("No se pudo guardar el cliente: " + str(e))
 
-    
     if "pending_delete_client_id" not in st.session_state:
         st.session_state.pending_delete_client_id = None
 
@@ -538,7 +534,9 @@ with sec1:
             except Exception as e:
                 st.error("No se pudo borrar el cliente: " + str(e))
 
-
+# =========================
+# PESTAÑA 2: CONFIGURAR PRÉSTAMO
+# =========================
 with sec2:
     st.subheader("Configuración del préstamo (con cuota inicial + entidad financiera)")
 
@@ -565,6 +563,7 @@ with sec2:
         grace_partial = st.number_input("Gracia parcial (meses)", min_value=0, step=1)
         fee_opening = st.number_input("Comisión de apertura (t0)", min_value=0.0, step=100.0)
         seguro_desgravamen = st.number_input("Seguro de desgravamen (mensual)", min_value=0.0, step=10.0)
+        seguro_inmueble = st.number_input("Seguro de inmueble (mensual)", min_value=0.0, step=10.0)
         gasto_administrativo = st.number_input("Gasto administrativo (mensual)", min_value=0.0, step=10.0)
 
     i_m = tea_to_monthly(tasa_anual)
@@ -597,6 +596,8 @@ with sec2:
             ok = False
 
         if ok:
+            seguro_total_mensual = seguro_desgravamen + seguro_inmueble
+
             df = build_schedule(
                 principal=monto_prestamo,
                 i_m=i_m,
@@ -605,7 +606,7 @@ with sec2:
                 grace_partial=int(grace_partial),
                 start_date=datetime.today(),
                 fee_opening=fee_opening,
-                monthly_insurance=seguro_desgravamen,
+                monthly_insurance=seguro_total_mensual,
                 monthly_admin_fee=gasto_administrativo,
                 bono_monto=0.0,
             )
@@ -624,14 +625,18 @@ with sec2:
                 "grace_total": grace_total,
                 "grace_partial": grace_partial,
                 "fee_opening": fee_opening,
-                "monthly_insurance": seguro_desgravamen,
+                "monthly_insurance": seguro_total_mensual,   # total (desgravamen + inmueble)
+                "seguro_desgravamen": seguro_desgravamen,
+                "seguro_inmueble": seguro_inmueble,
                 "monthly_admin_fee": gasto_administrativo,
                 "principal_mode": "NET",
                 "generated_at": datetime.utcnow().isoformat(),
             }
             st.success("Cronograma generado. Guarda el caso en la pestaña 3).")
 
-
+# =========================
+# PESTAÑA 3: GUARDAR CASO
+# =========================
 with sec3:
     st.subheader("Guardar caso (cliente + préstamo)")
 
@@ -659,7 +664,9 @@ with sec3:
                 except Exception as e:
                     st.error("No se pudo guardar el caso: " + str(e))
 
-
+# =========================
+# PESTAÑA 4: CASOS & KPIs
+# =========================
 with sec4:
     st.subheader("Casos guardados y KPIs del caso seleccionado")
 
@@ -729,7 +736,7 @@ with sec4:
             case_currency = str(params.get("currency", "PEN"))
             symbol = "S/." if case_currency == "PEN" else "$"
 
-            
+            # TCEA (cliente) via TIR de flujos
             cashflows_cli = df2["Flujo Cliente"].to_numpy()
             irr_m_cli = irr(cashflows_cli)
             tcea = (1 + irr_m_cli) ** 12 - 1 if np.isfinite(irr_m_cli) else np.nan
@@ -738,20 +745,6 @@ with sec4:
             fee_opening = float(params.get("fee_opening", 0.0))
             i_m = float(params.get("i_m", float("nan")))
             df_pos = df2[df2["Periodo"] > 0]
-
-            
-            cf_bank_credit = [-principal + fee_opening]
-            for _, r in df_pos.iterrows():
-                cf_bank_credit.append(float(r["Cuota"]))
-            irr_m_bank_credit = irr(np.array(cf_bank_credit, dtype=float))
-            trea_credit = (1 + irr_m_bank_credit) ** 12 - 1 if np.isfinite(irr_m_bank_credit) else np.nan
-
-            
-            cf_bank_total = [-principal + fee_opening]
-            for _, r in df_pos.iterrows():
-                cf_bank_total.append(float(r["Cuota Total"]))
-            irr_m_bank_total = irr(np.array(cf_bank_total, dtype=float))
-            trea_total = (1 + irr_m_bank_total) ** 12 - 1 if np.isfinite(irr_m_bank_total) else np.nan
 
             g_total = int(float(params.get("grace_total", 0)))
             g_parcial = int(float(params.get("grace_partial", 0)))
@@ -771,7 +764,7 @@ with sec4:
 
             interes_total = float(df_pos["Interés"].sum())
             amort_total = float(df_pos["Amortización"].sum())
-            seg_total = float(df_pos["Seguro"].sum())
+            seg_total = float(df_pos["Seguro"].sum())          # incluye desgravamen + inmueble
             gadm_total = float(df_pos["Gasto Adm"].sum())
             costo_total_cliente = float(-df_pos["Flujo Cliente"].sum())
 
@@ -784,7 +777,6 @@ with sec4:
             cuota_ini = float(params.get("cuota_inicial", np.nan))
             bono = float(params.get("bono", 0.0))
 
-            
             st.session_state["helpbot_ctx"] = {
                 "case_id": int(case_id),
                 "case_name": str(case_name),
@@ -801,8 +793,6 @@ with sec4:
                 "cuota": float(cuota_francesa),
                 "cuota_total": float(cuota_inicial_total),
                 "tcea": float(tcea) if np.isfinite(tcea) else None,
-                "trea_credit": float(trea_credit) if np.isfinite(trea_credit) else None,
-                "trea_total": float(trea_total) if np.isfinite(trea_total) else None,
                 "interes_total": float(interes_total),
                 "seg_total": float(seg_total),
                 "adm_total": float(gadm_total),
@@ -828,31 +818,56 @@ with sec4:
                     )
 
             r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
-            with r1c1: st.metric("TIR mensual (TIRM)", f"{irr_m_cli*100:.3f}%" if np.isfinite(irr_m_cli) else "No converge")
-            with r1c2: st.metric("TCEA (cliente)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
-            with r1c3: st.metric("TREA (crédito)", f"{trea_credit*100:.3f}%" if np.isfinite(trea_credit) else "-")
-            with r1c4: st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
-            with r1c5: st.metric("Monto préstamo", f"{symbol} {principal:,.2f}")
-
-            st.caption(f"TREA Total Cobros (cuota+seguro+adm): {trea_total*100:.3f}%" if np.isfinite(trea_total) else "TREA Total Cobros: -")
+            with r1c1:
+                st.metric("TIR mensual (TIRM)", f"{irr_m_cli*100:.3f}%" if np.isfinite(irr_m_cli) else "No converge")
+            with r1c2:
+                st.metric("TCEA (cliente)", f"{tcea*100:.3f}%" if np.isfinite(tcea) else "-")
+            with r1c3:
+                st.metric("TEA (referencial entidad)", f"{tea_case*100:.3f}%" if np.isfinite(tea_case) else "-")
+            with r1c4:
+                st.metric("Total pagado (∑ pagos)", f"{symbol} {costo_total_cliente:,.2f}")
+            with r1c5:
+                st.metric("Monto préstamo", f"{symbol} {principal:,.2f}")
 
             r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-            with r2c1: st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
-            with r2c2: st.metric("Plazo amortización (meses)", f"{n_amort}")
-            with r2c3: st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
-            with r2c4: st.metric("1ra fecha de cuota", fecha_primera_cuota)
+            with r2c1:
+                st.metric("TEM (i_m)", f"{i_m*100:.4f}%" if np.isfinite(i_m) else "-")
+            with r2c2:
+                st.metric("Plazo amortización (meses)", f"{n_amort}")
+            with r2c3:
+                st.metric("Gracia total / parcial", f"{g_total} / {g_parcial}")
+            with r2c4:
+                st.metric("1ra fecha de cuota", fecha_primera_cuota)
 
             r3c1, r3c2, r3c3, r3c4 = st.columns(4)
-            with r3c1: st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
-            with r3c2: st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
-            with r3c3: st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
-            with r3c4: st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
+            with r3c1:
+                st.metric("Cuota francesa (sin gastos)", f"{symbol} {cuota_francesa:,.2f}")
+            with r3c2:
+                st.metric("Cuota inicial total (con gastos)", f"{symbol} {cuota_inicial_total:,.2f}")
+            with r3c3:
+                st.metric("Cuota/Ingreso (%)", f"{ratio_cuota_ingreso:.2f}%" if np.isfinite(ratio_cuota_ingreso) else "-")
+            with r3c4:
+                st.metric("TC usado", f"1 USD = {EXCHANGE_RATE:.2f} PEN")
 
             r4c1, r4c2, r4c3, r4c4 = st.columns(4)
-            with r4c1: st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
-            with r4c2: st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
-            with r4c3: st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")
-            with r4c4: st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
+            with r4c1:
+                st.metric("Interés total", f"{symbol} {interes_total:,.2f}")
+            with r4c2:
+                st.metric("Amortización total", f"{symbol} {amort_total:,.2f}")
+            with r4c3:
+                st.metric("Seguros totales", f"{symbol} {seg_total:,.2f}")  # desgravamen + inmueble
+            with r4c4:
+                st.metric("Gastos Adm totales", f"{symbol} {gadm_total:,.2f}")
+
+            # Apartado detalle de seguros
+            seguro_desg_mensual = float(params.get("seguro_desgravamen", 0.0))
+            seguro_inm_mensual = float(params.get("seguro_inmueble", 0.0))
+            st.markdown(
+                f"**Detalle de seguros mensuales:** "
+                f"Desgravamen: {symbol} {seguro_desg_mensual:,.2f} | "
+                f"Inmueble: {symbol} {seguro_inm_mensual:,.2f} | "
+                f"Total: {symbol} {(seguro_desg_mensual + seguro_inm_mensual):,.2f}"
+            )
 
             st.markdown("### 📅 Cronograma del caso seleccionado")
             st.dataframe(
@@ -878,7 +893,9 @@ with sec4:
                 mime="text/csv"
             )
 
-
+# =========================
+# PESTAÑA 5: BASE DE DATOS
+# =========================
 with sec5:
     st.subheader("📦 Base de datos")
 
@@ -926,7 +943,9 @@ with sec5:
             except Exception as e:
                 st.error(f"No se pudo leer la tabla {table}: {e}")
 
-
+# =========================
+# HELPY CHATBOT - CONTEXTO
+# =========================
 ctx = st.session_state.get("helpbot_ctx", None)
 ctx_json = json.dumps(ctx, ensure_ascii=False) if ctx else "null"
 
@@ -1144,14 +1163,14 @@ HELPBOT_INJECT_TEMPLATE = r"""
       { label: "👤 Crear cliente", q: "¿Cómo creo un cliente?" },
       { label: "📅 Cronograma", q: "¿Cómo genero el cronograma?" },
       { label: "💾 Guardar caso", q: "¿Cómo guardo un caso?" },
-      { label: "📈 TCEA vs TREA", q: "Explícame por qué TCEA y TREA salen diferentes" },
+      { label: "📈 TCEA vs TEA", q: "Explícame por qué TCEA y TEA salen diferentes" },
       { label: "⬇️ Descargar CSV", q: "¿Cómo descargo el CSV?" }
     ];
 
     const NUDGES = [
       "👋 ¿Necesitas ayuda? Soy Helpy 🤖",
       "Tip: genera el cronograma y luego guarda el caso 💾",
-      "¿No entiendes TCEA/TREA? Pregúntame y te lo explico fácil 🙂",
+      "¿No entiendes TCEA/TEA? Pregúntame y te lo explico fácil 🙂",
       "¿Quieres exportar? Tienes botón para descargar CSV ⬇️",
     ];
 
@@ -1238,9 +1257,9 @@ HELPBOT_INJECT_TEMPLATE = r"""
       div.className = "mv-context";
       const sym = CTX.symbol || "";
       const tcea = CTX.tcea != null ? pct(CTX.tcea) : "-";
-      const trea = CTX.trea_credit != null ? pct(CTX.trea_credit) : "-";
+      const tea = CTX.tea != null ? pct(CTX.tea) : "-";
       div.textContent =
-        `Caso activo #${CTX.case_id}: ${CTX.case_name} | Préstamo: ${money(sym, CTX.principal)} | TCEA: ${tcea} | TREA(crédito): ${trea}`;
+        `Caso activo #${CTX.case_id}: ${CTX.case_name} | Préstamo: ${money(sym, CTX.principal)} | TCEA: ${tcea} | TEA: ${tea}`;
       body.appendChild(div);
     }
 
@@ -1269,34 +1288,34 @@ Puedo responder preguntas sobre cómo usar la plataforma.`);
       }
     }
 
-    function explainTceaTreaWithNumbers(){
+    function explainTceaTeaWithNumbers(){
       if (!CTX) {
         return "Aún no tengo números de un caso. Ve a 'Casos & KPIs', selecciona un caso y vuelve aquí 🙂";
       }
       const sym = CTX.symbol || "";
-      const p = CTX.principal;
-      const fee = CTX.fee_opening;
       const segM = CTX.monthly_insurance;
       const admM = CTX.monthly_admin_fee;
       const cuota = CTX.cuota;
       const cuotaTot = CTX.cuota_total;
 
       const tcea = CTX.tcea != null ? pct(CTX.tcea) : "-";
-      const treaC = CTX.trea_credit != null ? pct(CTX.trea_credit) : "-";
-      const treaT = CTX.trea_total != null ? pct(CTX.trea_total) : "-";
+      const tea = CTX.tea != null ? pct(CTX.tea) : "-";
 
       return (
-`No son lo mismo porque miran flujos distintos:
+`No son lo mismo porque miran cosas distintas:
 
-1) TCEA (cliente) = “cuánto te cuesta a ti”.
-- En t0 tú recibes: préstamo - comisión apertura
-- Luego tú pagas: Cuota Total = cuota + desgravamen + gasto adm
+1) TEA = tasa nominal de la entidad
+- Es la tasa anual que la entidad publica.
+- Se calcula sobre el saldo del préstamo sin mirar seguros ni gastos.
+➡️ En tu caso: TEA ≈ ${tea}
+
+2) TCEA = costo efectivo para ti (cliente)
+- En t0 recibes: préstamo menos comisión de apertura.
+- Luego pagas cada mes la Cuota Total = cuota + seguros + gastos.
   Ejemplo: ${money(sym, cuota)} + ${money(sym, segM)} + ${money(sym, admM)} = ${money(sym, cuotaTot)}
-➡️ Por eso sale TCEA = ${tcea}
+- Con esos flujos se calcula la TIR anual → TCEA ≈ ${tcea}
 
-2) TREA (entidad) = “cuánto gana la entidad”.
-- TREA (crédito): solo ‘Cuota’ del préstamo → ${treaC}
-- TREA (total cobros): si metes también cargos → ${treaT}`
+Por eso la TCEA suele ser mayor que la TEA: porque incluye comisión, seguros (desgravamen + inmueble) y gastos administrativos.`
       );
     }
 
@@ -1304,11 +1323,11 @@ Puedo responder preguntas sobre cómo usar la plataforma.`);
       const q = (qRaw || "").toLowerCase().trim();
       if (!q) return "Escribe tu pregunta y te ayudo 🙂";
 
-      if (q.includes("tcea") && q.includes("trea") && (q.includes("difer") || q.includes("por que") || q.includes("por qué") || q.includes("explica"))) {
-        return explainTceaTreaWithNumbers();
+      if (q.includes("tcea") && q.includes("tea") && (q.includes("difer") || q.includes("por que") || q.includes("por qué") || q.includes("explica"))) {
+        return explainTceaTeaWithNumbers();
       }
-      if (q.includes("tcea") || q.includes("trea") || q.includes("tir") || q.includes("tirm")) {
-        return "TCEA = costo anual efectivo para el cliente. TREA = rentabilidad anual efectiva para la entidad. Si quieres, dime: “Explícame por qué TCEA y TREA salen diferentes”.";
+      if (q.includes("tcea") || q.includes("tea") || q.includes("tir") || q.includes("tirm")) {
+        return "TEA = tasa nominal que publica la entidad. TCEA = costo anual efectivo total que pagas tú (incluye comisión, seguros y gastos). Si quieres, dime: “Explícame por qué TCEA y TEA salen diferentes”.";
       }
 
       if (q.includes("login") || q.includes("iniciar") || q.includes("sesion") || q.includes("sesión") || q.includes("contraseña") || q.includes("usuario")) {
@@ -1320,7 +1339,7 @@ Puedo responder preguntas sobre cómo usar la plataforma.`);
       }
 
       if (q.includes("cronograma") || q.includes("cuota") || q.includes("prestamo") || q.includes("préstamo") || q.includes("gracia") || q.includes("tea") || q.includes("tem") || q.includes("entidad") || q.includes("cuota inicial")) {
-        return "Cronograma: pestaña 'Configurar Préstamo'. Pon valor del inmueble, cuota inicial, bono y plazo. Elige entidad (TEA ya está). Define gracia y gastos y presiona 'Generar cronograma'.";
+        return "Cronograma: pestaña 'Configurar Préstamo'. Pon valor del inmueble, cuota inicial, bono y plazo. Elige entidad (TEA ya está). Define gracia, seguros y gastos y presiona 'Generar cronograma'.";
       }
 
       if (q.includes("guardar caso") || (q.includes("guardar") && q.includes("caso"))) {
@@ -1339,7 +1358,7 @@ Puedo responder preguntas sobre cómo usar la plataforma.`);
         return "En la pestaña correspondiente puedes acceder si tienes la clave de acceso asignada por el administrador.";
       }
 
-      return "Te ayudo con: clientes, cronograma, guardar casos, TCEA/TREA y exportación CSV. Escribe tu duda.";
+      return "Te ayudo con: clientes, cronograma, guardar casos, TCEA/TEA y exportación CSV. Escribe tu duda.";
     }
 
     function sendMsg(){
